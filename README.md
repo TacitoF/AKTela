@@ -1,13 +1,12 @@
-# AKTela Activity v1.1
+# AKTela Activity v1.2
 
-Correções:
-- aceita pacotes binários como ArrayBuffer ou Blob;
-- detecta automaticamente profile/level H.264 lendo o SPS do quadro-chave;
-- não depende mais do codec H.264 hardcoded;
-- mostra erros reais do decoder em vez de descartá-los silenciosamente;
-- preserva o último quadro durante reconexões curtas;
-- classificação de latência menos agressiva.
+Frontend da Activity do Discord.
 
-URL Mapping necessário no Discord:
-- `/` -> `ak-tela-three.vercel.app`
-- `/relay` -> `aktela-relay.tacito1-filho.workers.dev`
+## Correções desta versão
+
+- Usa `patchUrlMappings` do Embedded App SDK para o WebSocket externo.
+- Solicita ao relay o transporte textual de mídia (`transport=text`) para atravessar o proxy do Discord com consistência.
+- Continua aceitando mídia binária fora do Discord.
+- Remove dependência de `DataView.getBigInt64` no parser do pacote.
+- Melhora mensagens de sincronização e reconexão.
+- Mantém tela cheia imersiva, volume individual e interface da versão anterior.

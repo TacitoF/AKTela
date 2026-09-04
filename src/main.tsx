@@ -1,12 +1,18 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { DiscordSDK } from '@discord/embedded-app-sdk';
+import { DiscordSDK, patchUrlMappings } from '@discord/embedded-app-sdk';
 import './style.css';
 
 const CLIENT_ID = '1545406549105713182';
-const DIRECT_RELAY = 'wss://aktela-relay.tacito1-filho.workers.dev/ws';
+const RELAY_TARGET = 'aktela-relay.tacito1-filho.workers.dev';
+const DIRECT_RELAY = `wss://${RELAY_TARGET}/ws`;
+const TEXT_MEDIA_PREFIX = '@media:';
 const PROTOCOL_MAGIC = [65, 75, 86, 52]; // AKV4
 const HEADER = 24;
+if (location.hostname.endsWith('discordsays.com')) {
+  patchUrlMappings([{ prefix: '/relay', target: RELAY_TARGET }]);
+}
+
 const discordSdk = new DiscordSDK(CLIENT_ID);
 
 type StreamConfig = {
@@ -48,12 +54,17 @@ function roomCode(instanceId: string) {
 }
 
 function viewerRelayUrl(room: string) {
-  // Dentro do Discord, todo tráfego externo precisa passar pelo proxy/URL Mapping.
-  if (location.hostname.endsWith('discordsays.com')) {
-    return `wss://${location.host}/relay/ws?role=viewer&room=${encodeURIComponent(room)}`;
-  }
-  // Facilita testes fora do iframe do Discord.
-  return `${DIRECT_RELAY}?role=viewer&room=${encodeURIComponent(room)}`;
+  // patchUrlMappings reescreve o domínio externo para /relay dentro do Discord.
+  // O viewer pede transporte textual porque esse caminho é o mais consistente
+  // através do proxy da Activity. Fora do Discord a URL direta continua válida.
+  return `${DIRECT_RELAY}?role=viewer&room=${encodeURIComponent(room)}&transport=text`;
+}
+
+function base64ToArrayBuffer(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
 }
 
 function startCodeLength(data: Uint8Array, i: number) {
@@ -262,8 +273,84 @@ function App() {
     return () => { active = false; };
   }, []);
 
+  const processMediaPacket = React.useCallback((ab: ArrayBuffer) => {
+    try {
+      if (ab.byteLength < HEADER) return;
+      const dv = new DataView(ab);
+      for (let i = 0; i < PROTOCOL_MAGIC.length; i++) {
+        if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
+      }
+
+      const kind = dv.getUint8(5);
+      const key = (dv.getUint8(6) & 1) !== 0;
+      const lo = dv.getUint32(8, true);
+      const hi = dv.getInt32(12, true);
+      const ts = hi * 4294967296 + lo;
+      const duration = dv.getInt32(16, true);
+      const len = dv.getInt32(20, true);
+      if (len < 0 || HEADER + len > ab.byteLength) return;
+
+      const payload = new Uint8Array(ab, HEADER, len);
+      ensureTimeline(ts);
+
+      if (kind === 1) {
+        videoPacketCount.current++;
+        if (videoPacketCount.current === 1) setVideoPackets(1);
+        const cfg = configRef.current;
+        if (!cfg) return;
+
+        if (waitForKeyframe.current && !key) return;
+
+        if (key) {
+          const detectedCodec = codecFromAnnexB(payload);
+          if (!detectedCodec) {
+            setError('Recebi vídeo, mas o quadro-chave chegou sem SPS. Aguardando o próximo quadro-chave.');
+            waitForKeyframe.current = true;
+            return;
+          }
+
+          if (videoDecoder.current?.state !== 'configured' || videoCodecRef.current !== detectedCodec) {
+            if (!configureVideo(cfg, detectedCodec)) return;
+          }
+          waitForKeyframe.current = false;
+        }
+
+        if (videoDecoder.current?.state !== 'configured') return;
+        if (videoDecoder.current.decodeQueueSize > 3 && !key) return;
+
+        const C = (window as any).EncodedVideoChunk;
+        if (!C) {
+          setError('EncodedVideoChunk não está disponível neste cliente do Discord.');
+          return;
+        }
+
+        videoDecoder.current.decode(new C({
+          type: key ? 'key' : 'delta',
+          timestamp: ts,
+          duration,
+          data: payload
+        }));
+        setLive(true);
+        return;
+      }
+
+      if (kind === 2 && audioDecoder.current?.state === 'configured') {
+        if (audioDecoder.current.decodeQueueSize > 8) return;
+        const C = (window as any).EncodedAudioChunk;
+        if (!C) return;
+        audioDecoder.current.decode(new C({ type: 'key', timestamp: ts, duration, data: payload }));
+      }
+    } catch (e: any) {
+      waitForKeyframe.current = true;
+      setHasVideo(false);
+      setError(`Falha ao processar pacote de mídia: ${e?.message ?? e}`);
+    }
+  }, [configureVideo, ensureTimeline]);
+
   React.useEffect(() => {
     let disposed = false;
+    let reconnectAttempt = 0;
+
     const connect = () => {
       if (disposed) return;
       const url = viewerRelayUrl(room);
@@ -272,6 +359,7 @@ function App() {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        reconnectAttempt = 0;
         setRelayConnected(true);
         setError('');
         ws.send(JSON.stringify({ type: 'ping', sentAt: Date.now() }));
@@ -279,6 +367,15 @@ function App() {
 
       ws.onmessage = (event) => {
         if (typeof event.data === 'string') {
+          if (event.data.startsWith(TEXT_MEDIA_PREFIX)) {
+            try {
+              processMediaPacket(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length)));
+            } catch (e: any) {
+              setError(`Falha ao reconstruir vídeo recebido: ${e?.message ?? e}`);
+            }
+            return;
+          }
+
           try {
             const m = JSON.parse(event.data) as RelayControl;
             if (m.type === 'status') {
@@ -317,75 +414,14 @@ function App() {
           return;
         }
 
-        const processBinary = (ab: ArrayBuffer) => {
-          if (ab.byteLength < HEADER) return;
-          const dv = new DataView(ab);
-          for (let i = 0; i < PROTOCOL_MAGIC.length; i++) if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
-          const kind = dv.getUint8(5);
-          const key = (dv.getUint8(6) & 1) !== 0;
-          const ts = Number(dv.getBigInt64(8, true));
-          const duration = dv.getInt32(16, true);
-          const len = dv.getInt32(20, true);
-          if (len < 0 || HEADER + len > ab.byteLength) return;
-          const payload = new Uint8Array(ab, HEADER, len);
-          ensureTimeline(ts);
-
-          try {
-            if (kind === 1) {
-              videoPacketCount.current++;
-              if (videoPacketCount.current === 1) setVideoPackets(1);
-              const cfg = configRef.current;
-              if (!cfg) return;
-
-              if (waitForKeyframe.current && !key) return;
-
-              if (key) {
-                const detectedCodec = codecFromAnnexB(payload);
-                if (!detectedCodec) {
-                  setError('Recebi um quadro-chave H.264 sem SPS. Aguardando o próximo quadro-chave.');
-                  waitForKeyframe.current = true;
-                  return;
-                }
-
-                if (videoDecoder.current?.state !== 'configured' || videoCodecRef.current !== detectedCodec) {
-                  if (!configureVideo(cfg, detectedCodec)) return;
-                }
-
-                waitForKeyframe.current = false;
-              }
-
-              if (videoDecoder.current?.state !== 'configured') return;
-              if (videoDecoder.current.decodeQueueSize > 5 && !key) return;
-
-              const C = (window as any).EncodedVideoChunk;
-              videoDecoder.current.decode(new C({
-                type: key ? 'key' : 'delta',
-                timestamp: ts,
-                duration,
-                data: payload
-              }));
-              setLive(true);
-            } else if (kind === 2 && audioDecoder.current?.state === 'configured') {
-              if (audioDecoder.current.decodeQueueSize > 8) return;
-              const C = (window as any).EncodedAudioChunk;
-              audioDecoder.current.decode(new C({ type: 'key', timestamp: ts, duration, data: payload }));
-            }
-          } catch (e: any) {
-            if (kind === 1) {
-              waitForKeyframe.current = true;
-              setHasVideo(false);
-              setError(`Erro ao enviar quadro ao decoder: ${e?.message ?? e}`);
-            }
-          }
-        };
-
+        // Compatibilidade: fora do Discord o relay ainda pode enviar mídia binária.
         if (event.data instanceof ArrayBuffer) {
-          processBinary(event.data);
+          processMediaPacket(event.data);
         } else if (event.data instanceof Blob) {
-          void event.data.arrayBuffer().then(processBinary).catch(() => setError('Falha ao ler pacote de vídeo do relay.'));
+          void event.data.arrayBuffer().then(processMediaPacket).catch(() => setError('Falha ao ler pacote binário do relay.'));
         } else if (ArrayBuffer.isView(event.data)) {
           const view = event.data as ArrayBufferView;
-          processBinary(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
+          processMediaPacket(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
         }
       };
 
@@ -394,9 +430,10 @@ function App() {
         setLive(false);
         if (!disposed) {
           if (ev.code === 1006 && location.hostname.endsWith('discordsays.com')) {
-            setError('Não foi possível alcançar o relay. Confirme o URL Mapping /relay no Developer Portal.');
+            setError('A conexão com o relay caiu. Reconectando automaticamente.');
           }
-          reconnectTimer.current = window.setTimeout(connect, 1200);
+          const delay = Math.min(4000, 600 * Math.pow(1.6, reconnectAttempt++));
+          reconnectTimer.current = window.setTimeout(connect, delay);
         }
       };
       ws.onerror = () => { try { ws.close(); } catch { } };
@@ -417,7 +454,7 @@ function App() {
       try { audioDecoder.current?.close?.(); } catch { }
       try { audioContext.current?.close(); } catch { }
     };
-  }, [room, configureVideo, configureAudio, ensureTimeline, resetTimeline]);
+  }, [room, configureAudio, processMediaPacket, resetTimeline]);
 
   React.useEffect(() => {
     localStorage.setItem('aktela-volume', String(volume));
@@ -446,7 +483,7 @@ function App() {
   }, []);
 
   const status = !discordReady ? 'Conectando ao Discord' : !relayConnected ? 'Reconectando ao relay' : live ? 'Ao vivo' : 'Aguardando Capture';
-  const health = !relayConnected ? 'Offline' : latency === 0 ? 'Conectando' : latency < 120 ? 'Excelente' : latency < 250 ? 'Boa' : latency < 400 ? 'Alta latência' : 'Instável';
+  const health = !relayConnected ? 'Offline' : latency === 0 ? 'Conectando' : latency < 120 ? 'Excelente' : latency < 260 ? 'Boa' : latency < 450 ? 'Alta latência' : 'Instável';
   const quality = config ? `${config.height >= 1080 ? '1080p' : '720p'} · ${config.fps} FPS` : '—';
 
   return <main className="page"><section className={`shell ${immersive ? 'immersive' : ''}`}>
@@ -461,7 +498,7 @@ function App() {
         <div ref={cursorRef} className="remote-cursor" style={{ display: 'none' }}><svg viewBox="0 0 32 32"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg></div>
       </div>
 
-      {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live ? (videoPackets > 0 ? 'Iniciando vídeo' : 'Aguardando quadros de vídeo') : 'Pronto para receber uma transmissão'}</h2><p>{live ? 'A conexão está ativa. O primeiro quadro-chave será exibido assim que chegar.' : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
+      {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live ? (videoPackets > 0 ? 'Preparando o primeiro quadro' : 'Aguardando vídeo do Capture') : 'Pronto para receber uma transmissão'}</h2><p>{live ? (videoPackets > 0 ? 'Os dados de vídeo já chegaram. O decoder está sincronizando o quadro-chave.' : 'A conexão e a sala estão ativas; aguardando o primeiro pacote de mídia.') : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
 
       {!immersive && <>
         <div className="live-badge"><span className={`live-dot ${live ? 'active' : ''}`}/>{live ? 'AO VIVO' : 'AGUARDANDO'}</div>
