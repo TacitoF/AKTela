@@ -55,6 +55,9 @@ const Icon=({name}:{name:'volume'|'mute'|'fullscreen'|'copy'|'monitor'|'fit'})=>
 function App(){
   const playerRef=React.useRef<HTMLDivElement>(null);
   const canvasRef=React.useRef<HTMLCanvasElement>(null);
+  const canvasCtxRef=React.useRef<CanvasRenderingContext2D|null>(null);
+  const cursorElRef=React.useRef<HTMLDivElement>(null);
+  const hasVideoRef=React.useRef(false);
   const wsRef=React.useRef<WebSocket|null>(null);
   const reconnect=React.useRef<number|null>(null);
   const videoDecoder=React.useRef<any>(null),audioDecoder=React.useRef<any>(null);
@@ -74,8 +77,8 @@ function App(){
   const [latency,setLatency]=React.useState(0);
   const [error,setError]=React.useState('');
   const [config,setConfig]=React.useState<StreamConfig|null>(null);
-  const [cursor,setCursor]=React.useState({x:0,y:0,visible:false,w:32/1920,h:32/1080,hx:.05,hy:.05});
   const [fit,setFit]=React.useState<'contain'|'cover'>('contain');
+  const [immersive,setImmersive]=React.useState(false);
 
   const resetTimeline=React.useCallback(()=>{mediaBaseUs.current=null;perfBaseMs.current=0;audioBaseSec.current=0;},[]);
   const ensureTimeline=React.useCallback((ts:number)=>{
@@ -98,10 +101,13 @@ function App(){
         const draw=()=>{
           const c=canvasRef.current;
           if(c){
-            if(c.width!==cfg.width)c.width=cfg.width;
-            if(c.height!==cfg.height)c.height=cfg.height;
-            const ctx=c.getContext('2d',{alpha:false});
-            if(ctx){ctx.drawImage(frame,0,0,c.width,c.height);setHasVideo(true);}
+            if(c.width!==cfg.width||c.height!==cfg.height){c.width=cfg.width;c.height=cfg.height;canvasCtxRef.current=null;}
+            const ctx=canvasCtxRef.current??c.getContext('2d',{alpha:false,desynchronized:true});
+            canvasCtxRef.current=ctx;
+            if(ctx){
+              ctx.drawImage(frame,0,0,c.width,c.height);
+              if(!hasVideoRef.current){hasVideoRef.current=true;setHasVideo(true);}
+            }
           }
           frame.close();
         };
@@ -163,10 +169,19 @@ function App(){
         if(typeof ev.data==='string'){
           try{
             const m=JSON.parse(ev.data) as RelayMessage;
-            if(m.type==='status'){setLive(m.live);if(!m.live){setHasVideo(false);setCursor(c=>({...c,visible:false}));resetTimeline();}}
+            if(m.type==='status'){setLive(m.live);if(!m.live){hasVideoRef.current=false;setHasVideo(false);const el=cursorElRef.current;if(el)el.style.display='none';resetTimeline();}}
             else if(m.type==='viewer-count')setViewers(m.count);
             else if(m.type==='stream-config'){setConfig(m);resetTimeline();configureVideo(m);configureAudio(m);}
-            else if(m.type==='cursor')setCursor({x:m.x,y:m.y,visible:m.visible,w:m.w??32/(config?.width??1920),h:m.h??32/(config?.height??1080),hx:m.hx??.05,hy:m.hy??.05});
+            else if(m.type==='cursor'){
+              const el=cursorElRef.current;
+              if(el){
+                const w=m.w??32/(config?.width??1920),h=m.h??32/(config?.height??1080),hx=m.hx??.05,hy=m.hy??.05;
+                el.style.display=m.visible?'block':'none';
+                el.style.left=`${m.x*100}%`;el.style.top=`${m.y*100}%`;
+                el.style.width=`${w*100}%`;el.style.height=`${h*100}%`;
+                el.style.transform=`translate(-${hx*100}%,-${hy*100}%)`;
+              }
+            }
             else if(m.type==='pong'&&m.sentAt)setLatency(Math.max(0,Date.now()-m.sentAt));
             else if(m.type==='error')setError(m.message);
           }catch{}
@@ -216,16 +231,19 @@ function App(){
     const t=document.createElement('textarea');t.value=room;t.style.position='fixed';t.style.left='-9999px';document.body.appendChild(t);t.select();
     try{if(document.execCommand('copy'))ok();else prompt('Copie o código:',room);}finally{t.remove();}
   };
-  const toggleFullscreen=async()=>{
-    try{if(document.fullscreenElement)await document.exitFullscreen();else await playerRef.current?.requestFullscreen();}
-    catch{setError('Tela cheia não está disponível nesta janela do Discord.');}
-  };
+  const toggleFullscreen=()=>setImmersive(v=>!v);
+
+  React.useEffect(()=>{
+    const onKey=(ev:KeyboardEvent)=>{if(ev.key==='Escape'&&immersive)setImmersive(false);};
+    window.addEventListener('keydown',onKey);
+    return()=>window.removeEventListener('keydown',onKey);
+  },[immersive]);
 
   const status=!discordReady?'Conectando ao Discord':!relayConnected?'Reconectando ao relay':live?'Ao vivo':'Aguardando Capture';
   const health=!relayConnected?'Offline':latency===0?'Conectando':latency<90?'Excelente':latency<160?'Boa':'Instável';
   const quality=config?`${config.height>=1080?'1080p':'720p'} · ${config.fps} FPS`:'—';
 
-  return <main className="page"><section className="shell">
+  return <main className="page"><section className={`shell ${immersive?'immersive':''}`}>
     <header className="topbar">
       <div className="brand"><div className="logo">AK</div><div><h1>AKTela</h1><p>Compartilhamento em baixa latência</p></div></div>
       <div className={`connection ${relayConnected?'ok':''}`}><span className="dot"/><span>{status}</span></div>
@@ -234,16 +252,9 @@ function App(){
     <div className="player" ref={playerRef} onDoubleClick={toggleFullscreen}>
       <div className={`surface ${fit}`} style={{aspectRatio:`${config?.width??16}/${config?.height??9}`}}>
         <canvas ref={canvasRef} width={config?.width??1920} height={config?.height??1080} className={hasVideo?'frame visible':'frame'}/>
-        {cursor.visible&&hasVideo&&<div
-          className="remote-cursor"
-          style={{
-            left:`${cursor.x*100}%`,
-            top:`${cursor.y*100}%`,
-            width:`${cursor.w*100}%`,
-            height:`${cursor.h*100}%`,
-            transform:`translate(-${cursor.hx*100}%,-${cursor.hy*100}%)`
-          }}
-        ><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg></div>}
+        <div ref={cursorElRef} className="remote-cursor" style={{display:'none'}}>
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg>
+        </div>
       </div>
 
       {!hasVideo&&<div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live?'Sincronizando vídeo':'Pronto para receber uma transmissão'}</h2><p>Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.</p></div>}
@@ -256,11 +267,12 @@ function App(){
           {config?.audioEnabled&&<>
             <button className="icon-button" onClick={toggleMute} title={muted?'Ativar som':'Silenciar'}><Icon name={muted?'mute':'volume'}/></button>
             <input className="volume" aria-label="Volume" type="range" min="0" max="100" value={muted?0:volume} onChange={e=>{setMuted(false);setVolume(Number(e.target.value));}} onPointerDown={()=>{if(!audioOn)void enableAudio();}}/>
+            <span className="volume-value" aria-live="polite">{muted?0:volume}%</span>
           </>}
         </div>
         <div className="control-right">
           <button className="text-button" onClick={()=>setFit(v=>v==='contain'?'cover':'contain')}><Icon name="fit"/><span>{fit==='contain'?'Ajustar':'Preencher'}</span></button>
-          <button className="icon-button" onClick={toggleFullscreen} title="Tela cheia"><Icon name="fullscreen"/></button>
+          <button className="icon-button" onClick={toggleFullscreen} title={immersive?'Sair da tela cheia':'Tela cheia'} aria-pressed={immersive}><Icon name="fullscreen"/></button>
         </div>
       </div>
     </div>

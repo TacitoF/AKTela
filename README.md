@@ -1,14 +1,10 @@
-# AKTela Activity v0.5
+# AKTela Activity v0.5.2
 
-Atualização focada no cursor remoto.
+Atualização de usabilidade e desempenho do player.
 
-- Recebe tamanho e hotspot reais do cursor enviados pelo AKTela Capture v0.5.
-- Escala o cursor junto com o vídeo, em vez de usar um tamanho CSS fixo.
-- Mantém compatibilidade com Captures anteriores usando um tamanho padrão menor.
-
-## Páginas legais
-
-- `/termos` — Termos de Serviço
-- `/privacidade` — Política de Privacidade
-
-Essas páginas são copiadas pelo Vite a partir de `public/` e possuem rewrites no `vercel.json`.
+- Tela cheia agora usa modo imersivo dentro da Activity, compatível com o iframe do Discord.
+- Duplo clique no vídeo também entra/sai do modo imersivo; `Esc` sai.
+- Volume mostra a porcentagem ao lado do controle e continua salvo localmente por usuário/dispositivo.
+- Cursor remoto deixa de disparar renderizações React a cada movimento; a posição é atualizada diretamente no elemento.
+- Contexto 2D do canvas é reutilizado entre frames e o modo `desynchronized` é solicitado quando disponível para reduzir latência de apresentação.
+- Mantém Termos em `/termos` e Privacidade em `/privacidade`.
