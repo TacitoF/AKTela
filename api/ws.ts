@@ -16,7 +16,7 @@ function update(id:string,r:Room){
   if(!r.publisher&&!count)rooms.delete(id);
 }
 
-const server=createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,service:'AKTela relay v0.4'}));});
+const server=createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,service:'AKTela relay v0.5'}));});
 const wss=new WebSocketServer({server,maxPayload:4*1024*1024});
 wss.on('connection',(ws,req)=>{
   const u=new URL(req.url??'/','https://aktela.invalid'),role=u.searchParams.get('role'),id=(u.searchParams.get('room')??'').trim().toUpperCase();

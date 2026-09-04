@@ -23,7 +23,7 @@ type StreamConfig = {
   audioMode?:string;
   cursorPolicy?:string;
 };
-type CursorMessage={type:'cursor';x:number;y:number;visible:boolean};
+type CursorMessage={type:'cursor';x:number;y:number;visible:boolean;w?:number;h?:number;hx?:number;hy?:number};
 type RelayMessage =
   | {type:'status';live:boolean}
   | {type:'viewer-count';count:number}
@@ -74,7 +74,7 @@ function App(){
   const [latency,setLatency]=React.useState(0);
   const [error,setError]=React.useState('');
   const [config,setConfig]=React.useState<StreamConfig|null>(null);
-  const [cursor,setCursor]=React.useState({x:0,y:0,visible:false});
+  const [cursor,setCursor]=React.useState({x:0,y:0,visible:false,w:32/1920,h:32/1080,hx:.05,hy:.05});
   const [fit,setFit]=React.useState<'contain'|'cover'>('contain');
 
   const resetTimeline=React.useCallback(()=>{mediaBaseUs.current=null;perfBaseMs.current=0;audioBaseSec.current=0;},[]);
@@ -166,7 +166,7 @@ function App(){
             if(m.type==='status'){setLive(m.live);if(!m.live){setHasVideo(false);setCursor(c=>({...c,visible:false}));resetTimeline();}}
             else if(m.type==='viewer-count')setViewers(m.count);
             else if(m.type==='stream-config'){setConfig(m);resetTimeline();configureVideo(m);configureAudio(m);}
-            else if(m.type==='cursor')setCursor({x:m.x,y:m.y,visible:m.visible});
+            else if(m.type==='cursor')setCursor({x:m.x,y:m.y,visible:m.visible,w:m.w??32/(config?.width??1920),h:m.h??32/(config?.height??1080),hx:m.hx??.05,hy:m.hy??.05});
             else if(m.type==='pong'&&m.sentAt)setLatency(Math.max(0,Date.now()-m.sentAt));
             else if(m.type==='error')setError(m.message);
           }catch{}
@@ -234,7 +234,16 @@ function App(){
     <div className="player" ref={playerRef} onDoubleClick={toggleFullscreen}>
       <div className={`surface ${fit}`} style={{aspectRatio:`${config?.width??16}/${config?.height??9}`}}>
         <canvas ref={canvasRef} width={config?.width??1920} height={config?.height??1080} className={hasVideo?'frame visible':'frame'}/>
-        {cursor.visible&&hasVideo&&<div className="remote-cursor" style={{left:`${cursor.x*100}%`,top:`${cursor.y*100}%`}}><svg viewBox="0 0 28 34"><path d="M3 2v25l6.5-6.1 4.8 10.3 4.4-2-4.7-10.1H23L3 2Z"/></svg></div>}
+        {cursor.visible&&hasVideo&&<div
+          className="remote-cursor"
+          style={{
+            left:`${cursor.x*100}%`,
+            top:`${cursor.y*100}%`,
+            width:`${cursor.w*100}%`,
+            height:`${cursor.h*100}%`,
+            transform:`translate(-${cursor.hx*100}%,-${cursor.hy*100}%)`
+          }}
+        ><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg></div>}
       </div>
 
       {!hasVideo&&<div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live?'Sincronizando vídeo':'Pronto para receber uma transmissão'}</h2><p>Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.</p></div>}
