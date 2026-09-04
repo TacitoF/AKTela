@@ -1,15 +1,13 @@
-# AKTela v0.2
+# AKTela Activity v0.3
 
-Activity do Discord + relay WebSocket experimental.
+Player 1080p de baixa latência para a AKTela dentro do Discord.
 
-## Como testar
+## v0.3
+- H.264 Annex B decodificado com WebCodecs/decodificação de hardware quando disponível.
+- 30 ou 60 FPS definidos pelo Capture.
+- Áudio Opus do sistema com botão `Ativar áudio` para cumprir as regras de autoplay do navegador.
+- Pequeno buffer (~70 ms) para reduzir jitter sem acumular atraso.
+- Relay descarta backlog em clientes lentos e recupera no próximo keyframe.
+- Código de pareamento e fallback de cópia mantidos.
 
-1. Faça deploy deste projeto na mesma Vercel já usada pela AKTela.
-2. Abra a Activity no Discord.
-3. Copie o código de 6 caracteres exibido na parte inferior.
-4. Abra o AKTela Capture v0.2, cole o código e ligue o compartilhamento.
-5. Quem estiver na mesma instância da Activity verá a imagem dentro do Discord.
-
-## Observação
-
-Esta versão usa quadros JPEG compactados (modo leve) por WebSocket para validar o fluxo completo. A próxima etapa pode trocar o encoder por vídeo com aceleração de hardware para aumentar FPS e reduzir banda/CPU.
+O Discord Activity continua usando WebSocket, pois WebRTC não é suportado pelo ambiente de Activities.

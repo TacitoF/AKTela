@@ -1,107 +1,14 @@
 import { createServer } from 'node:http';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 
-type Room = {
-  publisher?: WebSocket;
-  viewers: Set<WebSocket>;
-};
-
-const rooms = new Map<string, Room>();
-const MAX_BUFFERED_BYTES = 1_500_000;
-
-function getRoom(roomId: string) {
-  let room = rooms.get(roomId);
-  if (!room) {
-    room = { viewers: new Set<WebSocket>() };
-    rooms.set(roomId, room);
-  }
-  return room;
-}
-
-function sendJson(ws: WebSocket, payload: unknown) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify(payload));
-}
-
-function updateRoomStatus(roomId: string, room: Room) {
-  const live = Boolean(room.publisher && room.publisher.readyState === WebSocket.OPEN);
-  const count = room.viewers.size;
-
-  for (const viewer of room.viewers) {
-    sendJson(viewer, { type: 'status', live });
-    sendJson(viewer, { type: 'viewer-count', count });
-  }
-
-  if (room.publisher) {
-    sendJson(room.publisher, { type: 'viewer-count', count });
-  }
-
-  if (!room.publisher && room.viewers.size === 0) {
-    rooms.delete(roomId);
-  }
-}
-
-const server = createServer((_req, res) => {
-  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify({ ok: true, service: 'AKTela relay' }));
-});
-
-const wss = new WebSocketServer({ server, maxPayload: 2 * 1024 * 1024 });
-
-wss.on('connection', (ws, req) => {
-  const url = new URL(req.url ?? '/', 'https://aktela.invalid');
-  const role = url.searchParams.get('role');
-  const roomId = (url.searchParams.get('room') ?? '').trim().toUpperCase();
-
-  if (!/^[A-Z2-9]{6}$/.test(roomId) || (role !== 'publisher' && role !== 'viewer')) {
-    sendJson(ws, { type: 'error', message: 'Parâmetros de conexão inválidos.' });
-    ws.close(1008, 'invalid parameters');
-    return;
-  }
-
-  const room = getRoom(roomId);
-
-  if (role === 'publisher') {
-    if (room.publisher && room.publisher !== ws) {
-      try { room.publisher.close(4001, 'publisher replaced'); } catch { /* noop */ }
-    }
-    room.publisher = ws;
-  } else {
-    room.viewers.add(ws);
-  }
-
-  updateRoomStatus(roomId, room);
-
-  ws.on('message', (data: RawData, isBinary: boolean) => {
-    if (!isBinary) {
-      try {
-        const text = data.toString();
-        const message = JSON.parse(text) as { type?: string };
-        if (message.type === 'ping') sendJson(ws, { type: 'pong' });
-      } catch {
-        // Mensagens de controle desconhecidas são ignoradas.
-      }
-      return;
-    }
-
-    if (role !== 'publisher' || room.publisher !== ws) return;
-
-    for (const viewer of room.viewers) {
-      if (viewer.readyState !== WebSocket.OPEN) continue;
-      if (viewer.bufferedAmount > MAX_BUFFERED_BYTES) continue;
-      viewer.send(data, { binary: true });
-    }
-  });
-
-  ws.on('close', () => {
-    if (role === 'publisher' && room.publisher === ws) room.publisher = undefined;
-    if (role === 'viewer') room.viewers.delete(ws);
-    updateRoomStatus(roomId, room);
-  });
-
-  ws.on('error', () => {
-    try { ws.close(); } catch { /* noop */ }
-  });
-});
-
+type Room={publisher?:WebSocket;viewers:Set<WebSocket>;streamConfig?:string};
+const rooms=new Map<string,Room>(); const MAX_BUFFERED=600_000; const waitKey=new WeakMap<WebSocket,boolean>();
+const roomFor=(id:string)=>{let r=rooms.get(id);if(!r){r={viewers:new Set()};rooms.set(id,r);}return r;};
+const json=(ws:WebSocket,p:unknown)=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(p));};
+function update(id:string,r:Room){const live=Boolean(r.publisher&&r.publisher.readyState===WebSocket.OPEN),count=r.viewers.size;for(const v of r.viewers){json(v,{type:'status',live});json(v,{type:'viewer-count',count});if(r.streamConfig&&live)try{v.send(r.streamConfig);}catch{}}if(r.publisher)json(r.publisher,{type:'viewer-count',count});if(!r.publisher&&!count)rooms.delete(id);}
+const server=createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({ok:true,service:'AKTela relay v0.3'}));});
+const wss=new WebSocketServer({server,maxPayload:4*1024*1024});
+wss.on('connection',(ws,req)=>{const u=new URL(req.url??'/','https://aktela.invalid'),role=u.searchParams.get('role'),id=(u.searchParams.get('room')??'').trim().toUpperCase();if(!/^[A-Z2-9]{6}$/.test(id)||(role!=='publisher'&&role!=='viewer')){json(ws,{type:'error',message:'Parâmetros inválidos.'});ws.close(1008);return;}const r=roomFor(id);if(role==='publisher'){if(r.publisher&&r.publisher!==ws)try{r.publisher.close(4001,'replaced');}catch{}r.publisher=ws;}else{r.viewers.add(ws);waitKey.set(ws,true);}update(id,r);
+ws.on('message',(data:RawData,isBinary:boolean)=>{if(!isBinary){const text=data.toString();try{const m=JSON.parse(text) as {type?:string};if(m.type==='ping')json(ws,{type:'pong'});if(role==='publisher'&&m.type==='stream-config'){r.streamConfig=text;for(const v of r.viewers)json(v,m);}}catch{}return;}if(role!=='publisher'||r.publisher!==ws)return;const b=Array.isArray(data)?Buffer.concat(data):Buffer.isBuffer(data)?data:Buffer.from(data as ArrayBuffer);if(b.length<24||b[0]!==65||b[1]!==75||b[2]!==86||b[3]!==51)return;const kind=b[5],key=b[6]===1;for(const v of r.viewers){if(v.readyState!==WebSocket.OPEN)continue;if(v.bufferedAmount>MAX_BUFFERED){if(kind===1)waitKey.set(v,true);continue;}if(kind===1&&waitKey.get(v)&&!key)continue;if(kind===1&&key)waitKey.set(v,false);try{v.send(b,{binary:true});}catch{}}});
+ws.on('close',()=>{if(role==='publisher'&&r.publisher===ws){r.publisher=undefined;r.streamConfig=undefined;}if(role==='viewer')r.viewers.delete(ws);update(id,r);});ws.on('error',()=>{try{ws.close();}catch{}});});
 export default server;

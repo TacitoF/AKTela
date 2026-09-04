@@ -4,5 +4,8 @@
     "api/ws.ts": {
       "maxDuration": 300
     }
-  }
+  },
+  "regions": [
+    "gru1"
+  ]
 }
