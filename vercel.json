@@ -1,29 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/ws.ts": {
-      "maxDuration": 300
-    }
-  },
-  "regions": [
-    "gru1"
-  ],
   "rewrites": [
-    {
-      "source": "/termos",
-      "destination": "/termos/index.html"
-    },
-    {
-      "source": "/termos/",
-      "destination": "/termos/index.html"
-    },
-    {
-      "source": "/privacidade",
-      "destination": "/privacidade/index.html"
-    },
-    {
-      "source": "/privacidade/",
-      "destination": "/privacidade/index.html"
-    }
+    { "source": "/termos", "destination": "/termos/index.html" },
+    { "source": "/termos/", "destination": "/termos/index.html" },
+    { "source": "/privacidade", "destination": "/privacidade/index.html" },
+    { "source": "/privacidade/", "destination": "/privacidade/index.html" }
   ]
 }

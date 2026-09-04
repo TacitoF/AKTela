@@ -1,14 +1,13 @@
-# AKTela Activity v0.5.4
+# AKTela Activity — reconstrução limpa v1
 
-Esta versão passa a ler o endereço do relay em `/relay.json`.
+A Activity **não conecta diretamente** ao domínio workers.dev quando roda dentro do Discord. Ela usa o proxy do Discord.
 
-Enquanto `relayUrl` estiver vazio, a Activity usa o relay antigo da própria Vercel.
-Depois de publicar o relay da Cloudflare, altere somente:
+## URL Mappings obrigatórios no Developer Portal
+Em **Atividades > Mapeamentos de URL**:
 
-```json
-{
-  "relayUrl": "wss://SEU-WORKER.workers.dev/ws"
-}
-```
+1. Prefixo `/relay` -> Alvo `aktela-relay.tacito1-filho.workers.dev`
+2. Prefixo `/` -> Alvo `ak-tela-three.vercel.app`
 
-O AKTela Capture v0.6.2 lê o mesmo arquivo, então a troca do relay não exige recompilar o executável.
+**Importante:** `/relay` deve ficar acima de `/`.
+
+Depois publique este projeto na Vercel.
