@@ -8,3 +8,26 @@
 .shell.immersive .surface.cover{width:100%;height:100%}
 .shell.immersive .player-controls{left:18px;right:18px;bottom:18px}
 .volume-value{min-width:34px;color:#c8cdd6;font-size:10px;font-variant-numeric:tabular-nums;text-align:right;user-select:none}
+
+/* v0.5.3: HUD imersiva mínima. Em tela cheia, o vídeo é o foco. */
+.shell.immersive .live-badge,
+.shell.immersive .stream-meta,
+.shell.immersive .player-controls{display:none!important}
+.immersive-exit,
+.immersive-volume{position:absolute;z-index:12;opacity:0;pointer-events:none;transition:opacity .18s ease,transform .18s ease}
+.player.hud-visible .immersive-exit,
+.player.hud-visible .immersive-volume{opacity:1;pointer-events:auto}
+.immersive-exit{top:16px;right:16px;width:38px;height:38px;display:grid;place-items:center;border:1px solid #ffffff18;border-radius:10px;background:#090a0cc7;color:#eef0f4;backdrop-filter:blur(12px);cursor:pointer;transform:translateY(-4px)}
+.player.hud-visible .immersive-exit{transform:none}
+.immersive-exit:hover{background:#202329}
+.immersive-volume{left:16px;bottom:16px;display:flex;align-items:center;height:42px;max-width:42px;overflow:hidden;border:1px solid #ffffff14;border-radius:12px;background:#090a0cc7;backdrop-filter:blur(12px);transition:max-width .18s ease,opacity .18s ease,transform .18s ease;transform:translateY(4px)}
+.player.hud-visible .immersive-volume{transform:none}
+.immersive-volume:hover,.immersive-volume:focus-within{max-width:190px}
+.immersive-audio-button{flex:0 0 40px;width:40px;height:40px;display:grid;place-items:center;border:0;background:transparent;color:#eef0f4;cursor:pointer}
+.immersive-audio-button:hover{background:#ffffff0d}
+.immersive-volume-details{display:flex;align-items:center;gap:8px;width:142px;padding:0 10px 0 2px;opacity:0;transition:opacity .12s ease}
+.immersive-volume:hover .immersive-volume-details,.immersive-volume:focus-within .immersive-volume-details{opacity:1}
+.immersive-volume .volume{width:88px}
+.immersive-volume .volume-value{min-width:31px;font-size:9px}
+.shell.immersive .player{cursor:none}
+.shell.immersive .player.hud-visible{cursor:default}

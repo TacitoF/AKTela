@@ -79,6 +79,8 @@ function App(){
   const [config,setConfig]=React.useState<StreamConfig|null>(null);
   const [fit,setFit]=React.useState<'contain'|'cover'>('contain');
   const [immersive,setImmersive]=React.useState(false);
+  const [immersiveHud,setImmersiveHud]=React.useState(true);
+  const immersiveHudTimer=React.useRef<number|null>(null);
 
   const resetTimeline=React.useCallback(()=>{mediaBaseUs.current=null;perfBaseMs.current=0;audioBaseSec.current=0;},[]);
   const ensureTimeline=React.useCallback((ts:number)=>{
@@ -231,13 +233,27 @@ function App(){
     const t=document.createElement('textarea');t.value=room;t.style.position='fixed';t.style.left='-9999px';document.body.appendChild(t);t.select();
     try{if(document.execCommand('copy'))ok();else prompt('Copie o código:',room);}finally{t.remove();}
   };
-  const toggleFullscreen=()=>setImmersive(v=>!v);
+  const showImmersiveHud=React.useCallback(()=>{
+    if(!immersive)return;
+    setImmersiveHud(true);
+    if(immersiveHudTimer.current)window.clearTimeout(immersiveHudTimer.current);
+    immersiveHudTimer.current=window.setTimeout(()=>setImmersiveHud(false),1800);
+  },[immersive]);
+  const toggleFullscreen=()=>setImmersive(v=>{
+    const next=!v;
+    if(next)setImmersiveHud(true);
+    return next;
+  });
 
   React.useEffect(()=>{
     const onKey=(ev:KeyboardEvent)=>{if(ev.key==='Escape'&&immersive)setImmersive(false);};
     window.addEventListener('keydown',onKey);
-    return()=>window.removeEventListener('keydown',onKey);
-  },[immersive]);
+    if(immersive)showImmersiveHud();
+    return()=>{
+      window.removeEventListener('keydown',onKey);
+      if(immersiveHudTimer.current)window.clearTimeout(immersiveHudTimer.current);
+    };
+  },[immersive,showImmersiveHud]);
 
   const status=!discordReady?'Conectando ao Discord':!relayConnected?'Reconectando ao relay':live?'Ao vivo':'Aguardando Capture';
   const health=!relayConnected?'Offline':latency===0?'Conectando':latency<90?'Excelente':latency<160?'Boa':'Instável';
@@ -249,7 +265,7 @@ function App(){
       <div className={`connection ${relayConnected?'ok':''}`}><span className="dot"/><span>{status}</span></div>
     </header>
 
-    <div className="player" ref={playerRef} onDoubleClick={toggleFullscreen}>
+    <div className={`player ${immersive&&immersiveHud?'hud-visible':''}`} ref={playerRef} onDoubleClick={toggleFullscreen} onPointerMove={showImmersiveHud} onPointerDown={showImmersiveHud}>
       <div className={`surface ${fit}`} style={{aspectRatio:`${config?.width??16}/${config?.height??9}`}}>
         <canvas ref={canvasRef} width={config?.width??1920} height={config?.height??1080} className={hasVideo?'frame visible':'frame'}/>
         <div ref={cursorElRef} className="remote-cursor" style={{display:'none'}}>
@@ -259,22 +275,35 @@ function App(){
 
       {!hasVideo&&<div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live?'Sincronizando vídeo':'Pronto para receber uma transmissão'}</h2><p>Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.</p></div>}
 
-      <div className="live-badge"><span className={live?'live-dot active':'live-dot'}/>{live?'AO VIVO':'AGUARDANDO'}</div>
-      <div className="stream-meta"><span>{quality}</span>{config?.audioEnabled&&<span>Áudio</span>}<span>{latency?`${latency} ms`:'— ms'}</span></div>
+      {!immersive&&<>
+        <div className="live-badge"><span className={live?'live-dot active':'live-dot'}/>{live?'AO VIVO':'AGUARDANDO'}</div>
+        <div className="stream-meta"><span>{quality}</span>{config?.audioEnabled&&<span>Áudio</span>}<span>{latency?`${latency} ms`:'— ms'}</span></div>
 
-      <div className="player-controls">
-        <div className="control-left">
-          {config?.audioEnabled&&<>
-            <button className="icon-button" onClick={toggleMute} title={muted?'Ativar som':'Silenciar'}><Icon name={muted?'mute':'volume'}/></button>
+        <div className="player-controls">
+          <div className="control-left">
+            {config?.audioEnabled&&<>
+              <button className="icon-button" onClick={toggleMute} title={muted?'Ativar som':'Silenciar'}><Icon name={muted?'mute':'volume'}/></button>
+              <input className="volume" aria-label="Volume" type="range" min="0" max="100" value={muted?0:volume} onChange={e=>{setMuted(false);setVolume(Number(e.target.value));}} onPointerDown={()=>{if(!audioOn)void enableAudio();}}/>
+              <span className="volume-value" aria-live="polite">{muted?0:volume}%</span>
+            </>}
+          </div>
+          <div className="control-right">
+            <button className="text-button" onClick={()=>setFit(v=>v==='contain'?'cover':'contain')}><Icon name="fit"/><span>{fit==='contain'?'Ajustar':'Preencher'}</span></button>
+            <button className="icon-button" onClick={toggleFullscreen} title="Tela cheia"><Icon name="fullscreen"/></button>
+          </div>
+        </div>
+      </>}
+
+      {immersive&&<>
+        <button className="immersive-exit" onClick={toggleFullscreen} title="Sair da tela cheia" aria-label="Sair da tela cheia"><Icon name="fullscreen"/></button>
+        {config?.audioEnabled&&<div className="immersive-volume">
+          <button className="immersive-audio-button" onClick={toggleMute} title={muted?'Ativar som':'Silenciar'}><Icon name={muted?'mute':'volume'}/></button>
+          <div className="immersive-volume-details">
             <input className="volume" aria-label="Volume" type="range" min="0" max="100" value={muted?0:volume} onChange={e=>{setMuted(false);setVolume(Number(e.target.value));}} onPointerDown={()=>{if(!audioOn)void enableAudio();}}/>
-            <span className="volume-value" aria-live="polite">{muted?0:volume}%</span>
-          </>}
-        </div>
-        <div className="control-right">
-          <button className="text-button" onClick={()=>setFit(v=>v==='contain'?'cover':'contain')}><Icon name="fit"/><span>{fit==='contain'?'Ajustar':'Preencher'}</span></button>
-          <button className="icon-button" onClick={toggleFullscreen} title={immersive?'Sair da tela cheia':'Tela cheia'} aria-pressed={immersive}><Icon name="fullscreen"/></button>
-        </div>
-      </div>
+            <span className="volume-value">{muted?0:volume}%</span>
+          </div>
+        </div>}
+      </>}
     </div>
 
     {error&&<div className="error"><span>{error}</span><button onClick={()=>setError('')}>Fechar</button></div>}
