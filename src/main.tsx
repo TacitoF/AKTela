@@ -12,7 +12,7 @@ const discordSdk = new DiscordSDK(CLIENT_ID);
 type StreamConfig = {
   type: 'stream-config';
   protocol: 4;
-  videoCodec: string;
+  videoCodec?: string;
   width: number;
   height: number;
   fps: number;
@@ -56,6 +56,24 @@ function viewerRelayUrl(room: string) {
   return `${DIRECT_RELAY}?role=viewer&room=${encodeURIComponent(room)}`;
 }
 
+function startCodeLength(data: Uint8Array, i: number) {
+  if (i + 3 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) return 4;
+  if (i + 2 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) return 3;
+  return 0;
+}
+
+function codecFromAnnexB(data: Uint8Array) {
+  for (let i = 0; i + 7 < data.length; i++) {
+    const sc = startCodeLength(data, i);
+    if (!sc) continue;
+    const nal = i + sc;
+    if ((data[nal] & 0x1f) !== 7 || nal + 3 >= data.length) continue;
+    const hex = (v: number) => v.toString(16).padStart(2, '0').toUpperCase();
+    return `avc1.${hex(data[nal + 1])}${hex(data[nal + 2])}${hex(data[nal + 3])}`;
+  }
+  return null;
+}
+
 function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'copy' | 'fit' | 'monitor' }) {
   const p = { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
   if (name === 'volume') return <svg {...p}><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="M15 9.2a4 4 0 0 1 0 5.6"/><path d="M17.8 6.5a8 8 0 0 1 0 11"/></svg>;
@@ -81,6 +99,9 @@ function App() {
   const perfBaseMs = React.useRef(0);
   const audioBaseSec = React.useRef(0);
   const waitForKeyframe = React.useRef(true);
+  const configRef = React.useRef<StreamConfig | null>(null);
+  const videoCodecRef = React.useRef('');
+  const videoPacketCount = React.useRef(0);
 
   const [discordReady, setDiscordReady] = React.useState(false);
   const [relayConnected, setRelayConnected] = React.useState(false);
@@ -98,6 +119,7 @@ function App() {
   const [muted, setMuted] = React.useState(false);
   const [volume, setVolume] = React.useState(() => Number(localStorage.getItem('aktela-volume') ?? '80'));
   const [audioReady, setAudioReady] = React.useState(false);
+  const [videoPackets, setVideoPackets] = React.useState(0);
 
   const resetTimeline = React.useCallback(() => {
     mediaBaseUs.current = null;
@@ -113,13 +135,17 @@ function App() {
     audioBaseSec.current = (audioContext.current?.currentTime ?? 0) + 0.045;
   }, []);
 
-  const configureVideo = React.useCallback((cfg: StreamConfig) => {
+  const configureVideo = React.useCallback((cfg: StreamConfig, codec: string) => {
     try { videoDecoder.current?.close?.(); } catch { }
+    videoDecoder.current = null;
+    videoCodecRef.current = '';
+
     const VideoDecoderCtor = (window as any).VideoDecoder;
     if (!VideoDecoderCtor) {
       setError('O cliente do Discord não oferece WebCodecs H.264 nesta plataforma.');
-      return;
+      return false;
     }
+
     const decoder = new VideoDecoderCtor({
       output: (frame: any) => {
         const ts = Number(frame.timestamp ?? 0);
@@ -137,6 +163,7 @@ function App() {
             canvasCtxRef.current = ctx;
             ctx?.drawImage(frame, 0, 0, canvas.width, canvas.height);
             setHasVideo(true);
+            setError('');
           }
           frame.close();
         };
@@ -145,19 +172,35 @@ function App() {
       },
       error: (e: any) => {
         waitForKeyframe.current = true;
-        setError(`Falha no decoder de vídeo: ${e?.message ?? e}`);
+        setHasVideo(false);
+        setError(`Falha ao decodificar H.264 (${codec}): ${e?.message ?? e}`);
+        try { videoDecoder.current?.close?.(); } catch { }
+        videoDecoder.current = null;
+        videoCodecRef.current = '';
       }
     });
-    decoder.configure({
-      codec: cfg.videoCodec,
+
+    const decoderConfig = {
+      codec,
       codedWidth: cfg.width,
       codedHeight: cfg.height,
       optimizeForLatency: true,
       hardwareAcceleration: 'prefer-hardware'
-    });
-    videoDecoder.current = decoder;
-    waitForKeyframe.current = true;
+    };
+
+    try {
+      decoder.configure(decoderConfig);
+      videoDecoder.current = decoder;
+      videoCodecRef.current = codec;
+      waitForKeyframe.current = true;
+      return true;
+    } catch (e: any) {
+      try { decoder.close(); } catch { }
+      setError(`H.264 não suportado pelo cliente (${codec}): ${e?.message ?? e}`);
+      return false;
+    }
   }, [ensureTimeline]);
+
 
   const ensureAudio = React.useCallback(async () => {
     let ac = audioContext.current;
@@ -246,10 +289,15 @@ function App() {
             } else if (m.type === 'pong') {
               setLatency(Math.max(0, Date.now() - m.sentAt));
             } else if (m.type === 'stream-config') {
+              configRef.current = m;
               setConfig(m);
               setHasVideo(false);
               resetTimeline();
-              configureVideo(m);
+              try { videoDecoder.current?.close?.(); } catch { }
+              videoDecoder.current = null;
+              videoCodecRef.current = '';
+              videoPacketCount.current = 0;
+              setVideoPackets(0);
               configureAudio(m);
             } else if (m.type === 'cursor') {
               const el = cursorRef.current;
@@ -269,41 +317,81 @@ function App() {
           return;
         }
 
-        const ab = event.data as ArrayBuffer;
-        if (ab.byteLength < HEADER) return;
-        const dv = new DataView(ab);
-        for (let i = 0; i < PROTOCOL_MAGIC.length; i++) if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
-        const kind = dv.getUint8(5);
-        const key = (dv.getUint8(6) & 1) !== 0;
-        const ts = Number(dv.getBigInt64(8, true));
-        const duration = dv.getInt32(16, true);
-        const len = dv.getInt32(20, true);
-        if (len < 0 || HEADER + len > ab.byteLength) return;
-        const payload = new Uint8Array(ab, HEADER, len);
-        ensureTimeline(ts);
+        const processBinary = (ab: ArrayBuffer) => {
+          if (ab.byteLength < HEADER) return;
+          const dv = new DataView(ab);
+          for (let i = 0; i < PROTOCOL_MAGIC.length; i++) if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
+          const kind = dv.getUint8(5);
+          const key = (dv.getUint8(6) & 1) !== 0;
+          const ts = Number(dv.getBigInt64(8, true));
+          const duration = dv.getInt32(16, true);
+          const len = dv.getInt32(20, true);
+          if (len < 0 || HEADER + len > ab.byteLength) return;
+          const payload = new Uint8Array(ab, HEADER, len);
+          ensureTimeline(ts);
 
-        try {
-          if (kind === 1 && videoDecoder.current?.state === 'configured') {
-            if (waitForKeyframe.current && !key) return;
-            if (key) waitForKeyframe.current = false;
-            if (videoDecoder.current.decodeQueueSize > 6 && !key) return;
-            const C = (window as any).EncodedVideoChunk;
-            videoDecoder.current.decode(new C({ type: key ? 'key' : 'delta', timestamp: ts, duration, data: payload }));
-            setLive(true);
-          } else if (kind === 2 && audioDecoder.current?.state === 'configured') {
-            if (audioDecoder.current.decodeQueueSize > 8) return;
-            const C = (window as any).EncodedAudioChunk;
-            audioDecoder.current.decode(new C({ type: 'key', timestamp: ts, duration, data: payload }));
+          try {
+            if (kind === 1) {
+              videoPacketCount.current++;
+              if (videoPacketCount.current === 1) setVideoPackets(1);
+              const cfg = configRef.current;
+              if (!cfg) return;
+
+              if (waitForKeyframe.current && !key) return;
+
+              if (key) {
+                const detectedCodec = codecFromAnnexB(payload);
+                if (!detectedCodec) {
+                  setError('Recebi um quadro-chave H.264 sem SPS. Aguardando o próximo quadro-chave.');
+                  waitForKeyframe.current = true;
+                  return;
+                }
+
+                if (videoDecoder.current?.state !== 'configured' || videoCodecRef.current !== detectedCodec) {
+                  if (!configureVideo(cfg, detectedCodec)) return;
+                }
+
+                waitForKeyframe.current = false;
+              }
+
+              if (videoDecoder.current?.state !== 'configured') return;
+              if (videoDecoder.current.decodeQueueSize > 5 && !key) return;
+
+              const C = (window as any).EncodedVideoChunk;
+              videoDecoder.current.decode(new C({
+                type: key ? 'key' : 'delta',
+                timestamp: ts,
+                duration,
+                data: payload
+              }));
+              setLive(true);
+            } else if (kind === 2 && audioDecoder.current?.state === 'configured') {
+              if (audioDecoder.current.decodeQueueSize > 8) return;
+              const C = (window as any).EncodedAudioChunk;
+              audioDecoder.current.decode(new C({ type: 'key', timestamp: ts, duration, data: payload }));
+            }
+          } catch (e: any) {
+            if (kind === 1) {
+              waitForKeyframe.current = true;
+              setHasVideo(false);
+              setError(`Erro ao enviar quadro ao decoder: ${e?.message ?? e}`);
+            }
           }
-        } catch {
-          if (kind === 1) waitForKeyframe.current = true;
+        };
+
+        if (event.data instanceof ArrayBuffer) {
+          processBinary(event.data);
+        } else if (event.data instanceof Blob) {
+          void event.data.arrayBuffer().then(processBinary).catch(() => setError('Falha ao ler pacote de vídeo do relay.'));
+        } else if (ArrayBuffer.isView(event.data)) {
+          const view = event.data as ArrayBufferView;
+          processBinary(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
         }
       };
 
       ws.onclose = (ev) => {
         setRelayConnected(false);
         setLive(false);
-        setHasVideo(false);
         if (!disposed) {
           if (ev.code === 1006 && location.hostname.endsWith('discordsays.com')) {
             setError('Não foi possível alcançar o relay. Confirme o URL Mapping /relay no Developer Portal.');
@@ -358,7 +446,7 @@ function App() {
   }, []);
 
   const status = !discordReady ? 'Conectando ao Discord' : !relayConnected ? 'Reconectando ao relay' : live ? 'Ao vivo' : 'Aguardando Capture';
-  const health = !relayConnected ? 'Offline' : latency === 0 ? 'Conectando' : latency < 90 ? 'Excelente' : latency < 160 ? 'Boa' : 'Instável';
+  const health = !relayConnected ? 'Offline' : latency === 0 ? 'Conectando' : latency < 120 ? 'Excelente' : latency < 250 ? 'Boa' : latency < 400 ? 'Alta latência' : 'Instável';
   const quality = config ? `${config.height >= 1080 ? '1080p' : '720p'} · ${config.fps} FPS` : '—';
 
   return <main className="page"><section className={`shell ${immersive ? 'immersive' : ''}`}>
@@ -373,7 +461,7 @@ function App() {
         <div ref={cursorRef} className="remote-cursor" style={{ display: 'none' }}><svg viewBox="0 0 32 32"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg></div>
       </div>
 
-      {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live ? 'Sincronizando vídeo' : 'Pronto para receber uma transmissão'}</h2><p>Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.</p></div>}
+      {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live ? (videoPackets > 0 ? 'Iniciando vídeo' : 'Aguardando quadros de vídeo') : 'Pronto para receber uma transmissão'}</h2><p>{live ? 'A conexão está ativa. O primeiro quadro-chave será exibido assim que chegar.' : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
 
       {!immersive && <>
         <div className="live-badge"><span className={`live-dot ${live ? 'active' : ''}`}/>{live ? 'AO VIVO' : 'AGUARDANDO'}</div>
