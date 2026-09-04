@@ -40,7 +40,19 @@ function roomCodeFromInstanceId(id:string){
   for(let i=0;i<6;i++){code+=alphabet[v%alphabet.length];v=(Math.floor(v/alphabet.length)^((h>>>(i+1))&0xffff))>>>0;}
   return code;
 }
-function relayUrl(room:string){const p=location.protocol==='https:'?'wss:':'ws:';return `${p}//${location.host}/api/ws?role=viewer&room=${encodeURIComponent(room)}`;}
+async function resolveRelayBase(){
+  try{
+    const r=await fetch(`/relay.json?v=${Date.now()}`,{cache:'no-store'});
+    if(r.ok){
+      const j=await r.json() as {relayUrl?:string};
+      const raw=(j.relayUrl??'').trim().replace(/\/$/,'');
+      if(/^wss?:\/\//i.test(raw))return raw;
+    }
+  }catch{}
+  const p=location.protocol==='https:'?'wss:':'ws:';
+  return `${p}//${location.host}/api/ws`;
+}
+function relayUrl(base:string,room:string){return `${base}?role=viewer&room=${encodeURIComponent(room)}`;}
 
 const Icon=({name}:{name:'volume'|'mute'|'fullscreen'|'copy'|'monitor'|'fit'})=>{
   const common={width:18,height:18,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.8,strokeLinecap:'round' as const,strokeLinejoin:'round' as const};
@@ -163,9 +175,10 @@ function App(){
 
   React.useEffect(()=>{
     let disposed=false;
+    let relayBase='';
     const connect=()=>{
-      if(disposed)return;
-      const ws=new WebSocket(relayUrl(room));ws.binaryType='arraybuffer';wsRef.current=ws;
+      if(disposed||!relayBase)return;
+      const ws=new WebSocket(relayUrl(relayBase,room));ws.binaryType='arraybuffer';wsRef.current=ws;
       ws.onopen=()=>{setRelayConnected(true);setError('');ws.send(JSON.stringify({type:'ping',sentAt:Date.now()}));};
       ws.onmessage=(ev)=>{
         if(typeof ev.data==='string'){
@@ -208,7 +221,7 @@ function App(){
       ws.onclose=()=>{setRelayConnected(false);if(!disposed)reconnect.current=window.setTimeout(connect,900);};
       ws.onerror=()=>{try{ws.close();}catch{}};
     };
-    connect();
+    void resolveRelayBase().then(base=>{if(!disposed){relayBase=base;connect();}});
     const hb=window.setInterval(()=>{if(wsRef.current?.readyState===WebSocket.OPEN)wsRef.current.send(JSON.stringify({type:'ping',sentAt:Date.now()}));},4000);
     return()=>{
       disposed=true;clearInterval(hb);if(reconnect.current)clearTimeout(reconnect.current);
