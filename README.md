@@ -1,12 +1,13 @@
-# AKTela Activity v1.2
+# AKTela Activity v1.3
 
-Frontend da Activity do Discord.
+Correções desta versão:
 
-## Correções desta versão
+- decoder H.264 agora consulta `VideoDecoder.isConfigSupported()` antes de configurar;
+- suporte a fallback entre aceleração de hardware, configuração padrão e software;
+- área de vídeo calcula o retângulo real da transmissão para preservar 100% da imagem;
+- cursor remoto passa a usar exatamente a mesma área renderizada do vídeo;
+- modo imersivo ocupa toda a área da Activity sem cortar a imagem;
+- botão Copiar mantém contraste branco;
+- mantém o relay atual e o protocolo AKV4.
 
-- Usa `patchUrlMappings` do Embedded App SDK para o WebSocket externo.
-- Solicita ao relay o transporte textual de mídia (`transport=text`) para atravessar o proxy do Discord com consistência.
-- Continua aceitando mídia binária fora do Discord.
-- Remove dependência de `DataView.getBigInt64` no parser do pacote.
-- Melhora mensagens de sincronização e reconexão.
-- Mantém tela cheia imersiva, volume individual e interface da versão anterior.
+Substitua os arquivos do repositório `AKTela` por estes arquivos e aguarde o deploy da Vercel.

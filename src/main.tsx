@@ -97,6 +97,8 @@ function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'copy' | 'fit
 
 function App() {
   const room = React.useMemo(() => roomCode(discordSdk.instanceId), []);
+  const playerRef = React.useRef<HTMLDivElement>(null);
+  const videoPlaneRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const canvasCtxRef = React.useRef<CanvasRenderingContext2D | null>(null);
   const cursorRef = React.useRef<HTMLDivElement>(null);
@@ -146,7 +148,7 @@ function App() {
     audioBaseSec.current = (audioContext.current?.currentTime ?? 0) + 0.045;
   }, []);
 
-  const configureVideo = React.useCallback((cfg: StreamConfig, codec: string) => {
+  const configureVideo = React.useCallback(async (cfg: StreamConfig, codec: string) => {
     try { videoDecoder.current?.close?.(); } catch { }
     videoDecoder.current = null;
     videoCodecRef.current = '';
@@ -154,6 +156,50 @@ function App() {
     const VideoDecoderCtor = (window as any).VideoDecoder;
     if (!VideoDecoderCtor) {
       setError('O cliente do Discord não oferece WebCodecs H.264 nesta plataforma.');
+      return false;
+    }
+
+    const candidates = [
+      {
+        codec,
+        codedWidth: cfg.width,
+        codedHeight: cfg.height,
+        optimizeForLatency: true,
+        hardwareAcceleration: 'prefer-hardware'
+      },
+      {
+        codec,
+        codedWidth: cfg.width,
+        codedHeight: cfg.height,
+        optimizeForLatency: true
+      },
+      {
+        codec,
+        codedWidth: cfg.width,
+        codedHeight: cfg.height,
+        optimizeForLatency: true,
+        hardwareAcceleration: 'prefer-software'
+      }
+    ];
+
+    let supportedConfig: any = null;
+    for (const candidate of candidates) {
+      try {
+        if (typeof VideoDecoderCtor.isConfigSupported === 'function') {
+          const support = await VideoDecoderCtor.isConfigSupported(candidate);
+          if (support?.supported) {
+            supportedConfig = support.config ?? candidate;
+            break;
+          }
+        } else {
+          supportedConfig = candidate;
+          break;
+        }
+      } catch { }
+    }
+
+    if (!supportedConfig) {
+      setError(`Este cliente do Discord não suporta o perfil H.264 recebido (${codec}). O Capture tentará um perfil mais compatível na próxima transmissão.`);
       return false;
     }
 
@@ -191,16 +237,8 @@ function App() {
       }
     });
 
-    const decoderConfig = {
-      codec,
-      codedWidth: cfg.width,
-      codedHeight: cfg.height,
-      optimizeForLatency: true,
-      hardwareAcceleration: 'prefer-hardware'
-    };
-
     try {
-      decoder.configure(decoderConfig);
+      decoder.configure(supportedConfig);
       videoDecoder.current = decoder;
       videoCodecRef.current = codec;
       waitForKeyframe.current = true;
@@ -273,7 +311,7 @@ function App() {
     return () => { active = false; };
   }, []);
 
-  const processMediaPacket = React.useCallback((ab: ArrayBuffer) => {
+  const processMediaPacket = React.useCallback(async (ab: ArrayBuffer) => {
     try {
       if (ab.byteLength < HEADER) return;
       const dv = new DataView(ab);
@@ -310,7 +348,7 @@ function App() {
           }
 
           if (videoDecoder.current?.state !== 'configured' || videoCodecRef.current !== detectedCodec) {
-            if (!configureVideo(cfg, detectedCodec)) return;
+            if (!await configureVideo(cfg, detectedCodec)) return;
           }
           waitForKeyframe.current = false;
         }
@@ -369,7 +407,7 @@ function App() {
         if (typeof event.data === 'string') {
           if (event.data.startsWith(TEXT_MEDIA_PREFIX)) {
             try {
-              processMediaPacket(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length)));
+              void processMediaPacket(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length)));
             } catch (e: any) {
               setError(`Falha ao reconstruir vídeo recebido: ${e?.message ?? e}`);
             }
@@ -416,12 +454,12 @@ function App() {
 
         // Compatibilidade: fora do Discord o relay ainda pode enviar mídia binária.
         if (event.data instanceof ArrayBuffer) {
-          processMediaPacket(event.data);
+          void processMediaPacket(event.data);
         } else if (event.data instanceof Blob) {
-          void event.data.arrayBuffer().then(processMediaPacket).catch(() => setError('Falha ao ler pacote binário do relay.'));
+          void event.data.arrayBuffer().then(ab => processMediaPacket(ab)).catch(() => setError('Falha ao ler pacote binário do relay.'));
         } else if (ArrayBuffer.isView(event.data)) {
           const view = event.data as ArrayBufferView;
-          processMediaPacket(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
+          void processMediaPacket(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
         }
       };
 
@@ -469,6 +507,16 @@ function App() {
     try { if (document.execCommand('copy')) done(); } finally { t.remove(); }
   };
 
+  const enterImmersive = React.useCallback(() => {
+    setFit('contain');
+    setImmersive(true);
+  }, []);
+
+  const toggleImmersive = React.useCallback(() => {
+    if (!immersive) setFit('contain');
+    setImmersive(v => !v);
+  }, [immersive]);
+
   const showHud = React.useCallback(() => {
     if (!immersive) return;
     setHud(true);
@@ -482,6 +530,55 @@ function App() {
     return () => window.removeEventListener('keydown', key);
   }, []);
 
+  React.useEffect(() => {
+    const player = playerRef.current;
+    const plane = videoPlaneRef.current;
+    if (!player || !plane) return;
+
+    const update = () => {
+      const rect = player.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const sourceW = Math.max(1, config?.width ?? 16);
+      const sourceH = Math.max(1, config?.height ?? 9);
+      const aspect = sourceW / sourceH;
+      const containerAspect = rect.width / rect.height;
+
+      let width: number;
+      let height: number;
+
+      if (fit === 'contain') {
+        if (containerAspect > aspect) {
+          height = rect.height;
+          width = height * aspect;
+        } else {
+          width = rect.width;
+          height = width / aspect;
+        }
+      } else {
+        if (containerAspect > aspect) {
+          width = rect.width;
+          height = width / aspect;
+        } else {
+          height = rect.height;
+          width = height * aspect;
+        }
+      }
+
+      plane.style.width = `${Math.ceil(width)}px`;
+      plane.style.height = `${Math.ceil(height)}px`;
+    };
+
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(player);
+    window.addEventListener('resize', update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [config?.width, config?.height, fit, immersive]);
+
   const status = !discordReady ? 'Conectando ao Discord' : !relayConnected ? 'Reconectando ao relay' : live ? 'Ao vivo' : 'Aguardando Capture';
   const health = !relayConnected ? 'Offline' : latency === 0 ? 'Conectando' : latency < 120 ? 'Excelente' : latency < 260 ? 'Boa' : latency < 450 ? 'Alta latência' : 'Instável';
   const quality = config ? `${config.height >= 1080 ? '1080p' : '720p'} · ${config.fps} FPS` : '—';
@@ -492,10 +589,12 @@ function App() {
       <div className={`connection ${relayConnected ? 'ok' : ''}`}><span className="dot"/><span>{status}</span></div>
     </header>
 
-    <div className={`player ${immersive && hud ? 'hud-visible' : ''}`} onDoubleClick={() => setImmersive(v => !v)} onPointerMove={showHud}>
-      <div className={`surface ${fit}`} style={{ aspectRatio: `${config?.width ?? 16}/${config?.height ?? 9}` }}>
-        <canvas ref={canvasRef} className={hasVideo ? 'frame visible' : 'frame'} width={config?.width ?? 1280} height={config?.height ?? 720}/>
-        <div ref={cursorRef} className="remote-cursor" style={{ display: 'none' }}><svg viewBox="0 0 32 32"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg></div>
+    <div ref={playerRef} className={`player ${immersive && hud ? 'hud-visible' : ''}`} onDoubleClick={toggleImmersive} onPointerMove={showHud}>
+      <div className={`surface ${fit}`}>
+        <div ref={videoPlaneRef} className="video-plane">
+          <canvas ref={canvasRef} className={hasVideo ? 'frame visible' : 'frame'} width={config?.width ?? 1280} height={config?.height ?? 720}/>
+          <div ref={cursorRef} className="remote-cursor" style={{ display: 'none' }}><svg viewBox="0 0 32 32"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg></div>
+        </div>
       </div>
 
       {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live ? (videoPackets > 0 ? 'Preparando o primeiro quadro' : 'Aguardando vídeo do Capture') : 'Pronto para receber uma transmissão'}</h2><p>{live ? (videoPackets > 0 ? 'Os dados de vídeo já chegaram. O decoder está sincronizando o quadro-chave.' : 'A conexão e a sala estão ativas; aguardando o primeiro pacote de mídia.') : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
@@ -509,7 +608,7 @@ function App() {
             <input className="volume" type="range" min="0" max="100" value={muted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio(); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/>
             <span className="volume-value">{muted ? 0 : volume}%</span>
           </>}</div>
-          <div className="control-right"><button className="text-button" onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Ajustar' : 'Preencher'}</span></button><button className="icon-button" onClick={() => setImmersive(true)}><Icon name="fullscreen"/></button></div>
+          <div className="control-right"><button className="text-button" onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Ajustar' : 'Preencher'}</span></button><button className="icon-button" onClick={enterImmersive}><Icon name="fullscreen"/></button></div>
         </div>
       </>}
 
