@@ -50,6 +50,7 @@ type RelayControl =
   | { type: 'status'; live: boolean }
   | { type: 'viewer-count'; count: number }
   | { type: 'pong'; sentAt: number }
+  | { type: 'latency-probe'; sentAt: number }
   | { type: 'error'; message: string }
   | { type: 'cursor'; x: number; y: number; visible: boolean; w?: number; h?: number; hx?: number; hy?: number }
   | StreamConfig;
@@ -89,6 +90,14 @@ function viewerRelayUrl(room: string, viewerId: string) {
 }
 
 function base64ToArrayBuffer(value: string) {
+  const fast = (Uint8Array as unknown as { fromBase64?: (input: string) => Uint8Array }).fromBase64;
+  if (typeof fast === 'function') {
+    try {
+      const bytes = fast.call(Uint8Array, value);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    } catch { }
+  }
+
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -190,6 +199,17 @@ function App() {
   const keyframeCounterRef = React.useRef(0);
   const droppedCounterRef = React.useRef(0);
   const decoderResetsRef = React.useRef(0);
+  const videoGenerationRef = React.useRef(0);
+  const decodedFrameCounterRef = React.useRef(0);
+  const decodedFrameRateBaseRef = React.useRef(0);
+  const lastVideoPacketAtRef = React.useRef(0);
+  const lastDecodedFrameAtRef = React.useRef(0);
+  const lastStallRecoveryAtRef = React.useRef(0);
+  const remoteCursorTimerRef = React.useRef<number | null>(null);
+  const remoteCursorVisibleRef = React.useRef(false);
+  const liveRef = React.useRef(false);
+  const relayConnectedRef = React.useRef(false);
+  const immersiveRef = React.useRef(false);
 
   const [discordReady, setDiscordReady] = React.useState(false);
   const [relayConnected, setRelayConnected] = React.useState(false);
@@ -209,7 +229,7 @@ function App() {
   const [videoPackets, setVideoPackets] = React.useState(0);
   const [capabilitiesReady, setCapabilitiesReady] = React.useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false);
-  const [diagnostics, setDiagnostics] = React.useState({ packetsPerSec: 0, decodeQueue: 0, codec: '—', reconnects: 0, keyframes: 0, dropped: 0, resets: 0 });
+  const [diagnostics, setDiagnostics] = React.useState({ packetsPerSec: 0, decodedFps: 0, decodeQueue: 0, codec: '—', reconnects: 0, keyframes: 0, dropped: 0, resets: 0, stalled: false });
 
   const resetTimeline = React.useCallback(() => {
     mediaBaseUs.current = null;
@@ -236,6 +256,7 @@ function App() {
   }, []);
 
   const closeVideoDecoder = React.useCallback(() => {
+    videoGenerationRef.current++;
     try { videoDecoder.current?.close?.(); } catch { }
     videoDecoder.current = null;
     videoCodecRef.current = '';
@@ -286,6 +307,7 @@ function App() {
         const support = await VideoDecoderCtor.isConfigSupported(candidate);
         if (!support?.supported) {
           setError(`Codec não suportado neste cliente: ${codec}. O AKTela solicitará modo compatibilidade.`);
+          rejectCodecCapability(cfg, codec);
           const ws = wsRef.current;
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'unsupported-codec', codec }));
           requestKeyframe('unsupported-codec');
@@ -294,15 +316,21 @@ function App() {
       }
     } catch (e: any) {
       setError(`Falha ao verificar ${codec}: ${e?.message ?? e}`);
+      rejectCodecCapability(cfg, codec);
       return false;
     }
 
+    const generation = videoGenerationRef.current;
     const decoder = new VideoDecoderCtor({
       output: (frame: any) => {
         const ts = Number(frame.timestamp ?? 0);
         ensureTimeline(ts);
         const due = perfBaseMs.current + (ts - (mediaBaseUs.current ?? ts)) / 1000;
         const draw = () => {
+          if (generation !== videoGenerationRef.current) {
+            frame.close();
+            return;
+          }
           const canvas = canvasRef.current;
           if (canvas) {
             if (canvas.width !== cfg.width || canvas.height !== cfg.height) {
@@ -313,6 +341,8 @@ function App() {
             const ctx = canvasCtxRef.current ?? canvas.getContext('2d', { alpha: false, desynchronized: true });
             canvasCtxRef.current = ctx;
             ctx?.drawImage(frame, 0, 0, canvas.width, canvas.height);
+            lastDecodedFrameAtRef.current = Date.now();
+            decodedFrameCounterRef.current++;
             setHasVideo(true);
             setError('');
           }
@@ -325,6 +355,7 @@ function App() {
         decoderResetsRef.current++;
         setHasVideo(false);
         setError(`Falha ao decodificar ${codec}: ${e?.message ?? e}`);
+        rejectCodecCapability(cfg, codec);
         closeVideoDecoder();
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'decode-error', codec }));
@@ -427,6 +458,7 @@ function App() {
       ensureTimeline(ts);
 
       if (kind === 1) {
+        lastVideoPacketAtRef.current = Date.now();
         packetCounterRef.current++;
         setVideoPackets(v => v === 0 ? 1 : v);
         const cfg = configRef.current;
@@ -505,6 +537,14 @@ function App() {
     return () => { active = false; };
   }, []);
 
+  React.useEffect(() => { liveRef.current = live; }, [live]);
+  React.useEffect(() => { relayConnectedRef.current = relayConnected; }, [relayConnected]);
+  React.useEffect(() => {
+    immersiveRef.current = immersive;
+    if (!immersive && remoteCursorVisibleRef.current && cursorRef.current)
+      cursorRef.current.style.display = 'block';
+  }, [immersive]);
+
   React.useEffect(() => {
     let disposed = false;
     let reconnectAttempt = 0;
@@ -526,6 +566,7 @@ function App() {
       ws.onopen = () => {
         reconnectAttempt = 0;
         lastPongRef.current = Date.now();
+        relayConnectedRef.current = true;
         setRelayConnected(true);
         setError('');
         if (capabilitiesRef.current) ws.send(JSON.stringify(capabilitiesRef.current));
@@ -548,8 +589,16 @@ function App() {
           try {
             const m = JSON.parse(event.data) as RelayControl;
             if (m.type === 'status') {
+              liveRef.current = m.live;
               setLive(m.live);
               if (!m.live) {
+                remoteCursorVisibleRef.current = false;
+                if (cursorRef.current) cursorRef.current.style.display = 'none';
+                configRef.current = null;
+                setConfig(null);
+                setVideoPackets(0);
+                try { audioDecoder.current?.close?.(); } catch { }
+                audioDecoder.current = null;
                 setHasVideo(false);
                 resetTimeline();
                 closeVideoDecoder();
@@ -562,6 +611,8 @@ function App() {
             } else if (m.type === 'stream-config') {
               configRef.current = m;
               setConfig(m);
+              lastVideoPacketAtRef.current = Date.now();
+              lastDecodedFrameAtRef.current = Date.now();
               setHasVideo(false);
               setError('');
               resetTimeline();
@@ -574,12 +625,22 @@ function App() {
               if (!el) return;
               const w = m.w ?? 0.016;
               const h = m.h ?? 0.028;
+              remoteCursorVisibleRef.current = m.visible;
               el.style.display = m.visible ? 'block' : 'none';
               el.style.left = `${m.x * 100}%`;
               el.style.top = `${m.y * 100}%`;
               el.style.width = `${w * 100}%`;
               el.style.height = `${h * 100}%`;
               el.style.transform = `translate(-${(m.hx ?? 0.05) * 100}%,-${(m.hy ?? 0.05) * 100}%)`;
+              if (remoteCursorTimerRef.current) window.clearTimeout(remoteCursorTimerRef.current);
+              if (m.visible && immersiveRef.current) {
+                remoteCursorTimerRef.current = window.setTimeout(() => {
+                  if (cursorRef.current) cursorRef.current.style.display = 'none';
+                }, 1600);
+              }
+            } else if (m.type === 'latency-probe') {
+              if (ws.readyState === WebSocket.OPEN)
+                ws.send(JSON.stringify({ type: 'latency-probe-ack', sentAt: m.sentAt }));
             } else if (m.type === 'error') {
               setError(m.message);
             }
@@ -595,6 +656,9 @@ function App() {
       };
 
       ws.onclose = () => {
+        relayConnectedRef.current = false;
+        remoteCursorVisibleRef.current = false;
+        if (cursorRef.current) cursorRef.current.style.display = 'none';
         setRelayConnected(false);
         setHasVideo(false);
         closeVideoDecoder();
@@ -636,6 +700,7 @@ function App() {
       window.clearInterval(heartbeat);
       document.removeEventListener('visibilitychange', visibility);
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
+      if (remoteCursorTimerRef.current) window.clearTimeout(remoteCursorTimerRef.current);
       try { wsRef.current?.close(); } catch { }
       closeVideoDecoder();
       try { audioDecoder.current?.close?.(); } catch { }
@@ -644,22 +709,61 @@ function App() {
   }, [closeVideoDecoder, configureAudio, processMediaPacket, requestKeyframe, resetTimeline, room]);
 
   React.useEffect(() => {
+    let healthTick = 0;
     const interval = window.setInterval(() => {
+      const now = Date.now();
       const total = packetCounterRef.current;
       const rate = total - packetRateBaseRef.current;
       packetRateBaseRef.current = total;
+      const decodedTotal = decodedFrameCounterRef.current;
+      const decodedFps = decodedTotal - decodedFrameRateBaseRef.current;
+      decodedFrameRateBaseRef.current = decodedTotal;
+      const packetAge = lastVideoPacketAtRef.current > 0 ? now - lastVideoPacketAtRef.current : Number.POSITIVE_INFINITY;
+      const frameAge = lastDecodedFrameAtRef.current > 0 ? now - lastDecodedFrameAtRef.current : Number.POSITIVE_INFINITY;
+      const expectingVideo = relayConnectedRef.current && liveRef.current && configRef.current !== null;
+      const packetsStopped = expectingVideo && packetAge > 2600;
+      const decoderStopped = expectingVideo && packetAge < 1300 && frameAge > 1900;
+      const stalled = packetsStopped || decoderStopped;
+
+      if (stalled && now - lastStallRecoveryAtRef.current > 2400) {
+        lastStallRecoveryAtRef.current = now;
+        decoderResetsRef.current++;
+        setHasVideo(false);
+        setError(packetsStopped
+          ? 'O vídeo parou de chegar. Solicitando recuperação automática.'
+          : 'O vídeo chegou, mas a reprodução travou. Reiniciando o decoder.');
+        resetTimeline();
+        closeVideoDecoder();
+        requestKeyframe(packetsStopped ? 'video-packets-stalled' : 'video-decode-stalled');
+      }
+
+      const decodeQueue = Number(videoDecoder.current?.decodeQueueSize ?? 0);
       setDiagnostics({
         packetsPerSec: rate,
-        decodeQueue: Number(videoDecoder.current?.decodeQueueSize ?? 0),
+        decodedFps,
+        decodeQueue,
         codec: videoCodecRef.current || configRef.current?.videoCodecString || '—',
         reconnects: reconnectsRef.current,
         keyframes: keyframeCounterRef.current,
         dropped: droppedCounterRef.current,
-        resets: decoderResetsRef.current
+        resets: decoderResetsRef.current,
+        stalled
       });
+
+      const ws = wsRef.current;
+      if ((++healthTick % 2) === 0 && ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'viewer-health',
+          decodedFps,
+          decodeQueue,
+          dropped: droppedCounterRef.current,
+          resets: decoderResetsRef.current,
+          stalled
+        }));
+      }
     }, 1000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [closeVideoDecoder, requestKeyframe, resetTimeline]);
 
   React.useEffect(() => {
     localStorage.setItem('aktela-volume', String(volume));
@@ -696,10 +800,20 @@ function App() {
     setFit('contain');
     setHud(true);
     setImmersive(true);
+    if (remoteCursorTimerRef.current) window.clearTimeout(remoteCursorTimerRef.current);
+    remoteCursorTimerRef.current = window.setTimeout(() => {
+      if (cursorRef.current) cursorRef.current.style.display = 'none';
+    }, 1600);
   }, []);
 
   const toggleImmersive = React.useCallback(() => {
-    if (!immersive) setFit('contain');
+    if (!immersive) {
+      setFit('contain');
+      if (remoteCursorTimerRef.current) window.clearTimeout(remoteCursorTimerRef.current);
+      remoteCursorTimerRef.current = window.setTimeout(() => {
+        if (cursorRef.current) cursorRef.current.style.display = 'none';
+      }, 1600);
+    }
     setImmersive(v => !v);
   }, [immersive]);
 
@@ -824,6 +938,7 @@ function App() {
         <div><span>Codec</span><strong>{diagnostics.codec}</strong></div>
         <div><span>Resolução</span><strong>{config ? `${config.width}×${config.height}` : '—'}</strong></div>
         <div><span>Pacotes/s</span><strong>{diagnostics.packetsPerSec}</strong></div>
+        <div><span>FPS reproduzido</span><strong>{diagnostics.decodedFps}</strong></div>
         <div><span>Fila decoder</span><strong>{diagnostics.decodeQueue}</strong></div>
         <div><span>Keyframes</span><strong>{diagnostics.keyframes}</strong></div>
         <div><span>Descartados</span><strong>{diagnostics.dropped}</strong></div>
@@ -831,6 +946,7 @@ function App() {
         <div><span>Reconexões</span><strong>{diagnostics.reconnects}</strong></div>
         <div><span>Capacidades</span><strong>{capabilitiesReady ? 'Enviadas' : 'Verificando'}</strong></div>
         <div><span>Transporte</span><strong>WebSocket texto</strong></div>
+        <div><span>Reprodução</span><strong>{diagnostics.stalled ? 'Recuperando' : 'Fluindo'}</strong></div>
       </div>
       <button className="request-key" onClick={() => requestKeyframe('manual-diagnostic')}>Solicitar novo quadro-chave</button>
     </section></div>}
