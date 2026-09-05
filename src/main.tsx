@@ -6,26 +6,43 @@ import './style.css';
 const CLIENT_ID = '1545406549105713182';
 const RELAY_TARGET = 'aktela-relay.tacito1-filho.workers.dev';
 const DIRECT_RELAY = `wss://${RELAY_TARGET}/ws`;
+const PROXIED_RELAY = `wss://${CLIENT_ID}.discordsays.com/relay/ws`;
 const TEXT_MEDIA_PREFIX = '@media:';
-const PROTOCOL_MAGIC = [65, 75, 86, 52]; // AKV4
+const PROTOCOL_MAGIC = [65, 75, 86, 53]; // AKV5
 const HEADER = 24;
+
 if (location.hostname.endsWith('discordsays.com')) {
   patchUrlMappings([{ prefix: '/relay', target: RELAY_TARGET }]);
 }
 
 const discordSdk = new DiscordSDK(CLIENT_ID);
 
+type ModeKey = '720p30' | '720p60' | '1080p30' | '1080p60';
+type CapabilityToken = 'h264-baseline' | 'h264-main' | 'h264-high' | 'vp8';
+
 type StreamConfig = {
   type: 'stream-config';
-  protocol: 4;
-  videoCodec?: string;
+  protocol: 5;
+  qualityKey: ModeKey;
+  videoCodec: 'h264' | 'vp8';
+  videoProfile: string;
+  videoCodecString: string;
   width: number;
   height: number;
   fps: number;
+  bitrateMbps: number;
   audioEnabled: boolean;
   audioSampleRate: number;
   audioChannels: number;
   preset: string;
+  compatibilityMode: boolean;
+};
+
+type ViewerCapabilities = {
+  type: 'viewer-capabilities';
+  protocol: 5;
+  modes: Partial<Record<ModeKey, CapabilityToken[]>>;
+  audioOpus: boolean;
 };
 
 type RelayControl =
@@ -36,6 +53,19 @@ type RelayControl =
   | { type: 'error'; message: string }
   | { type: 'cursor'; x: number; y: number; visible: boolean; w?: number; h?: number; hx?: number; hy?: number }
   | StreamConfig;
+
+const MODE_SPECS: Record<ModeKey, { width: number; height: number; fps: number; level: string }> = {
+  '720p30': { width: 1280, height: 720, fps: 30, level: '1F' },
+  '720p60': { width: 1280, height: 720, fps: 60, level: '20' },
+  '1080p30': { width: 1920, height: 1080, fps: 30, level: '28' },
+  '1080p60': { width: 1920, height: 1080, fps: 60, level: '2A' }
+};
+
+function tokenCodec(mode: ModeKey, token: CapabilityToken) {
+  if (token === 'vp8') return 'vp8';
+  const profile = token === 'h264-main' ? '4D40' : token === 'h264-high' ? '6400' : '42E0';
+  return `avc1.${profile}${MODE_SPECS[mode].level}`;
+}
 
 function roomCode(instanceId: string) {
   let hash = 2166136261 >>> 0;
@@ -53,11 +83,9 @@ function roomCode(instanceId: string) {
   return out;
 }
 
-function viewerRelayUrl(room: string) {
-  // patchUrlMappings reescreve o domínio externo para /relay dentro do Discord.
-  // O viewer pede transporte textual porque esse caminho é o mais consistente
-  // através do proxy da Activity. Fora do Discord a URL direta continua válida.
-  return `${DIRECT_RELAY}?role=viewer&room=${encodeURIComponent(room)}&transport=text`;
+function viewerRelayUrl(room: string, viewerId: string) {
+  const base = location.hostname.endsWith('discordsays.com') ? PROXIED_RELAY : DIRECT_RELAY;
+  return `${base}?role=viewer&room=${encodeURIComponent(room)}&transport=text&viewerId=${encodeURIComponent(viewerId)}`;
 }
 
 function base64ToArrayBuffer(value: string) {
@@ -85,18 +113,56 @@ function codecFromAnnexB(data: Uint8Array) {
   return null;
 }
 
-function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'copy' | 'fit' | 'monitor' }) {
+async function probeCapabilities(): Promise<ViewerCapabilities> {
+  const modes: Partial<Record<ModeKey, CapabilityToken[]>> = {};
+  const VideoDecoderCtor = (window as any).VideoDecoder;
+
+  if (VideoDecoderCtor?.isConfigSupported) {
+    for (const mode of Object.keys(MODE_SPECS) as ModeKey[]) {
+      const spec = MODE_SPECS[mode];
+      const supported: CapabilityToken[] = [];
+      const tokens: CapabilityToken[] = ['h264-baseline', 'h264-main', 'h264-high', 'vp8'];
+      for (const token of tokens) {
+        try {
+          const result = await VideoDecoderCtor.isConfigSupported({
+            codec: tokenCodec(mode, token),
+            codedWidth: spec.width,
+            codedHeight: spec.height,
+            optimizeForLatency: true
+          });
+          if (result?.supported) supported.push(token);
+        } catch { }
+      }
+      modes[mode] = supported;
+    }
+  }
+
+  let audioOpus = false;
+  const AudioDecoderCtor = (window as any).AudioDecoder;
+  if (AudioDecoderCtor?.isConfigSupported) {
+    try {
+      const result = await AudioDecoderCtor.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+      audioOpus = !!result?.supported;
+    } catch { }
+  }
+
+  return { type: 'viewer-capabilities', protocol: 5, modes, audioOpus };
+}
+
+function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'copy' | 'fit' | 'monitor' | 'close' }) {
   const p = { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
   if (name === 'volume') return <svg {...p}><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="M15 9.2a4 4 0 0 1 0 5.6"/><path d="M17.8 6.5a8 8 0 0 1 0 11"/></svg>;
   if (name === 'mute') return <svg {...p}><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="m16 9 5 5M21 9l-5 5"/></svg>;
   if (name === 'fullscreen') return <svg {...p}><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>;
   if (name === 'copy') return <svg {...p}><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>;
   if (name === 'fit') return <svg {...p}><path d="M8 5H5v3M16 5h3v3M8 19H5v-3M16 19h3v-3"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg>;
+  if (name === 'close') return <svg {...p}><path d="m6 6 12 12M18 6 6 18"/></svg>;
   return <svg {...p}><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>;
 }
 
 function App() {
   const room = React.useMemo(() => roomCode(discordSdk.instanceId), []);
+  const viewerIdRef = React.useRef(typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const playerRef = React.useRef<HTMLDivElement>(null);
   const videoPlaneRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -104,6 +170,7 @@ function App() {
   const cursorRef = React.useRef<HTMLDivElement>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
   const reconnectTimer = React.useRef<number | null>(null);
+  const hudTimer = React.useRef<number | null>(null);
   const videoDecoder = React.useRef<any>(null);
   const audioDecoder = React.useRef<any>(null);
   const audioContext = React.useRef<AudioContext | null>(null);
@@ -114,7 +181,15 @@ function App() {
   const waitForKeyframe = React.useRef(true);
   const configRef = React.useRef<StreamConfig | null>(null);
   const videoCodecRef = React.useRef('');
-  const videoPacketCount = React.useRef(0);
+  const capabilitiesRef = React.useRef<ViewerCapabilities | null>(null);
+  const lastPongRef = React.useRef(0);
+  const lastKeyframeRequestRef = React.useRef(0);
+  const reconnectsRef = React.useRef(0);
+  const packetCounterRef = React.useRef(0);
+  const packetRateBaseRef = React.useRef(0);
+  const keyframeCounterRef = React.useRef(0);
+  const droppedCounterRef = React.useRef(0);
+  const decoderResetsRef = React.useRef(0);
 
   const [discordReady, setDiscordReady] = React.useState(false);
   const [relayConnected, setRelayConnected] = React.useState(false);
@@ -128,11 +203,13 @@ function App() {
   const [fit, setFit] = React.useState<'contain' | 'cover'>('contain');
   const [immersive, setImmersive] = React.useState(false);
   const [hud, setHud] = React.useState(true);
-  const hudTimer = React.useRef<number | null>(null);
   const [muted, setMuted] = React.useState(false);
   const [volume, setVolume] = React.useState(() => Number(localStorage.getItem('aktela-volume') ?? '80'));
   const [audioReady, setAudioReady] = React.useState(false);
   const [videoPackets, setVideoPackets] = React.useState(0);
+  const [capabilitiesReady, setCapabilitiesReady] = React.useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false);
+  const [diagnostics, setDiagnostics] = React.useState({ packetsPerSec: 0, decodeQueue: 0, codec: '—', reconnects: 0, keyframes: 0, dropped: 0, resets: 0 });
 
   const resetTimeline = React.useCallback(() => {
     mediaBaseUs.current = null;
@@ -144,62 +221,79 @@ function App() {
   const ensureTimeline = React.useCallback((ts: number) => {
     if (mediaBaseUs.current !== null) return;
     mediaBaseUs.current = ts;
-    perfBaseMs.current = performance.now() + 45;
-    audioBaseSec.current = (audioContext.current?.currentTime ?? 0) + 0.045;
+    perfBaseMs.current = performance.now() + 35;
+    audioBaseSec.current = (audioContext.current?.currentTime ?? 0) + 0.035;
   }, []);
 
-  const configureVideo = React.useCallback(async (cfg: StreamConfig, codec: string) => {
+  const requestKeyframe = React.useCallback((reason: string) => {
+    const now = Date.now();
+    if (now - lastKeyframeRequestRef.current < 700) return;
+    lastKeyframeRequestRef.current = now;
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'request-keyframe', reason }));
+    }
+  }, []);
+
+  const closeVideoDecoder = React.useCallback(() => {
     try { videoDecoder.current?.close?.(); } catch { }
     videoDecoder.current = null;
     videoCodecRef.current = '';
+    waitForKeyframe.current = true;
+  }, []);
 
+  const rejectCodecCapability = React.useCallback((cfg: StreamConfig, codec: string) => {
+    const caps = capabilitiesRef.current;
+    if (!caps) return;
+
+    let token: CapabilityToken | null = null;
+    if (codec === 'vp8') token = 'vp8';
+    else if (codec.startsWith('avc1.') && codec.length >= 11) {
+      const profileHex = codec.slice(5, 7).toUpperCase();
+      token = profileHex === '42' ? 'h264-baseline' : profileHex === '4D' ? 'h264-main' : profileHex === '64' ? 'h264-high' : null;
+    }
+    if (!token) return;
+
+    const current = caps.modes[cfg.qualityKey] ?? [];
+    if (!current.includes(token)) return;
+
+    const updated: ViewerCapabilities = {
+      ...caps,
+      modes: { ...caps.modes, [cfg.qualityKey]: current.filter(item => item !== token) }
+    };
+    capabilitiesRef.current = updated;
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(updated));
+  }, []);
+
+  const configureVideo = React.useCallback(async (cfg: StreamConfig, codec: string) => {
+    closeVideoDecoder();
     const VideoDecoderCtor = (window as any).VideoDecoder;
     if (!VideoDecoderCtor) {
-      setError('O cliente do Discord não oferece WebCodecs H.264 nesta plataforma.');
+      setError('Este cliente do Discord não oferece WebCodecs para vídeo.');
       return false;
     }
 
-    const candidates = [
-      {
-        codec,
-        codedWidth: cfg.width,
-        codedHeight: cfg.height,
-        optimizeForLatency: true,
-        hardwareAcceleration: 'prefer-hardware'
-      },
-      {
-        codec,
-        codedWidth: cfg.width,
-        codedHeight: cfg.height,
-        optimizeForLatency: true
-      },
-      {
-        codec,
-        codedWidth: cfg.width,
-        codedHeight: cfg.height,
-        optimizeForLatency: true,
-        hardwareAcceleration: 'prefer-software'
-      }
-    ];
+    const candidate = {
+      codec,
+      codedWidth: cfg.width,
+      codedHeight: cfg.height,
+      optimizeForLatency: true
+    };
 
-    let supportedConfig: any = null;
-    for (const candidate of candidates) {
-      try {
-        if (typeof VideoDecoderCtor.isConfigSupported === 'function') {
-          const support = await VideoDecoderCtor.isConfigSupported(candidate);
-          if (support?.supported) {
-            supportedConfig = support.config ?? candidate;
-            break;
-          }
-        } else {
-          supportedConfig = candidate;
-          break;
+    try {
+      if (typeof VideoDecoderCtor.isConfigSupported === 'function') {
+        const support = await VideoDecoderCtor.isConfigSupported(candidate);
+        if (!support?.supported) {
+          setError(`Codec não suportado neste cliente: ${codec}. O AKTela solicitará modo compatibilidade.`);
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'unsupported-codec', codec }));
+          requestKeyframe('unsupported-codec');
+          return false;
         }
-      } catch { }
-    }
-
-    if (!supportedConfig) {
-      setError(`Este cliente do Discord não suporta o perfil H.264 recebido (${codec}). O Capture tentará um perfil mais compatível na próxima transmissão.`);
+      }
+    } catch (e: any) {
+      setError(`Falha ao verificar ${codec}: ${e?.message ?? e}`);
       return false;
     }
 
@@ -225,31 +319,35 @@ function App() {
           frame.close();
         };
         const wait = Math.max(0, due - performance.now());
-        wait > 3 ? window.setTimeout(draw, Math.min(wait, 90)) : draw();
+        wait > 3 ? window.setTimeout(draw, Math.min(wait, 70)) : draw();
       },
       error: (e: any) => {
-        waitForKeyframe.current = true;
+        decoderResetsRef.current++;
         setHasVideo(false);
-        setError(`Falha ao decodificar H.264 (${codec}): ${e?.message ?? e}`);
-        try { videoDecoder.current?.close?.(); } catch { }
-        videoDecoder.current = null;
-        videoCodecRef.current = '';
+        setError(`Falha ao decodificar ${codec}: ${e?.message ?? e}`);
+        closeVideoDecoder();
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'decode-error', codec }));
+        requestKeyframe('decode-error');
       }
     });
 
     try {
-      decoder.configure(supportedConfig);
+      decoder.configure(candidate);
       videoDecoder.current = decoder;
       videoCodecRef.current = codec;
       waitForKeyframe.current = true;
       return true;
     } catch (e: any) {
       try { decoder.close(); } catch { }
-      setError(`H.264 não suportado pelo cliente (${codec}): ${e?.message ?? e}`);
+      setError(`Não foi possível configurar ${codec}: ${e?.message ?? e}`);
+      rejectCodecCapability(cfg, codec);
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'configure-error', codec }));
+      requestKeyframe('configure-error');
       return false;
     }
-  }, [ensureTimeline]);
-
+  }, [closeVideoDecoder, ensureTimeline, rejectCodecCapability, requestKeyframe]);
 
   const ensureAudio = React.useCallback(async () => {
     let ac = audioContext.current;
@@ -270,9 +368,11 @@ function App() {
 
   const configureAudio = React.useCallback((cfg: StreamConfig) => {
     try { audioDecoder.current?.close?.(); } catch { }
+    audioDecoder.current = null;
     if (!cfg.audioEnabled) return;
     const AudioDecoderCtor = (window as any).AudioDecoder;
     if (!AudioDecoderCtor) return;
+
     const decoder = new AudioDecoderCtor({
       output: (data: any) => {
         const ac = audioContext.current;
@@ -292,32 +392,27 @@ function App() {
         source.connect(gain);
         let when = audioBaseSec.current + (ts - (mediaBaseUs.current ?? ts)) / 1_000_000;
         if (when < ac.currentTime + 0.006) when = ac.currentTime + 0.006;
-        if (when > ac.currentTime + 0.16) {
-          audioBaseSec.current -= when - (ac.currentTime + 0.045);
-          when = ac.currentTime + 0.045;
+        if (when > ac.currentTime + 0.14) {
+          audioBaseSec.current -= when - (ac.currentTime + 0.035);
+          when = ac.currentTime + 0.035;
         }
         source.start(when);
         data.close();
       },
       error: () => { }
     });
-    decoder.configure({ codec: 'opus', sampleRate: cfg.audioSampleRate, numberOfChannels: cfg.audioChannels });
-    audioDecoder.current = decoder;
-  }, [ensureTimeline]);
 
-  React.useEffect(() => {
-    let active = true;
-    discordSdk.ready().then(() => active && setDiscordReady(true)).catch(() => active && setDiscordReady(false));
-    return () => { active = false; };
-  }, []);
+    try {
+      decoder.configure({ codec: 'opus', sampleRate: cfg.audioSampleRate, numberOfChannels: cfg.audioChannels });
+      audioDecoder.current = decoder;
+    } catch { }
+  }, [ensureTimeline]);
 
   const processMediaPacket = React.useCallback(async (ab: ArrayBuffer) => {
     try {
       if (ab.byteLength < HEADER) return;
       const dv = new DataView(ab);
-      for (let i = 0; i < PROTOCOL_MAGIC.length; i++) {
-        if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
-      }
+      for (let i = 0; i < PROTOCOL_MAGIC.length; i++) if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
 
       const kind = dv.getUint8(5);
       const key = (dv.getUint8(6) & 1) !== 0;
@@ -332,29 +427,46 @@ function App() {
       ensureTimeline(ts);
 
       if (kind === 1) {
-        videoPacketCount.current++;
-        if (videoPacketCount.current === 1) setVideoPackets(1);
+        packetCounterRef.current++;
+        setVideoPackets(v => v === 0 ? 1 : v);
         const cfg = configRef.current;
         if (!cfg) return;
 
-        if (waitForKeyframe.current && !key) return;
+        if (waitForKeyframe.current && !key) {
+          droppedCounterRef.current++;
+          return;
+        }
 
+        let codec = cfg.videoCodec === 'vp8' ? 'vp8' : cfg.videoCodecString;
         if (key) {
-          const detectedCodec = codecFromAnnexB(payload);
-          if (!detectedCodec) {
-            setError('Recebi vídeo, mas o quadro-chave chegou sem SPS. Aguardando o próximo quadro-chave.');
-            waitForKeyframe.current = true;
-            return;
+          keyframeCounterRef.current++;
+          if (cfg.videoCodec === 'h264') {
+            const detected = codecFromAnnexB(payload);
+            if (!detected) {
+              setError('Quadro-chave H.264 sem SPS. Solicitando outro quadro-chave.');
+              waitForKeyframe.current = true;
+              requestKeyframe('missing-sps');
+              return;
+            }
+            codec = detected;
           }
 
-          if (videoDecoder.current?.state !== 'configured' || videoCodecRef.current !== detectedCodec) {
-            if (!await configureVideo(cfg, detectedCodec)) return;
+          if (videoDecoder.current?.state !== 'configured' || videoCodecRef.current !== codec) {
+            if (!await configureVideo(cfg, codec)) return;
           }
           waitForKeyframe.current = false;
         }
 
         if (videoDecoder.current?.state !== 'configured') return;
-        if (videoDecoder.current.decodeQueueSize > 3 && !key) return;
+
+        if (videoDecoder.current.decodeQueueSize > 5) {
+          droppedCounterRef.current++;
+          decoderResetsRef.current++;
+          setHasVideo(false);
+          closeVideoDecoder();
+          requestKeyframe('decoder-congestion');
+          return;
+        }
 
         const C = (window as any).EncodedVideoChunk;
         if (!C) {
@@ -379,38 +491,57 @@ function App() {
         audioDecoder.current.decode(new C({ type: 'key', timestamp: ts, duration, data: payload }));
       }
     } catch (e: any) {
-      waitForKeyframe.current = true;
+      droppedCounterRef.current++;
       setHasVideo(false);
-      setError(`Falha ao processar pacote de mídia: ${e?.message ?? e}`);
+      closeVideoDecoder();
+      setError(`Falha ao processar mídia: ${e?.message ?? e}`);
+      requestKeyframe('packet-error');
     }
-  }, [configureVideo, ensureTimeline]);
+  }, [closeVideoDecoder, configureVideo, ensureTimeline, requestKeyframe]);
+
+  React.useEffect(() => {
+    let active = true;
+    discordSdk.ready().then(() => active && setDiscordReady(true)).catch(() => active && setDiscordReady(false));
+    return () => { active = false; };
+  }, []);
 
   React.useEffect(() => {
     let disposed = false;
     let reconnectAttempt = 0;
 
+    void probeCapabilities().then(caps => {
+      if (disposed) return;
+      capabilitiesRef.current = caps;
+      setCapabilitiesReady(true);
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(caps));
+    });
+
     const connect = () => {
       if (disposed) return;
-      const url = viewerRelayUrl(room);
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(viewerRelayUrl(room, viewerIdRef.current));
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
       ws.onopen = () => {
         reconnectAttempt = 0;
+        lastPongRef.current = Date.now();
         setRelayConnected(true);
         setError('');
-        ws.send(JSON.stringify({ type: 'ping', sentAt: Date.now() }));
+        if (capabilitiesRef.current) ws.send(JSON.stringify(capabilitiesRef.current));
+        ws.send('ping');
+        requestKeyframe('viewer-connected');
       };
 
       ws.onmessage = (event) => {
         if (typeof event.data === 'string') {
+          if (event.data === 'pong') {
+            lastPongRef.current = Date.now();
+            return;
+          }
           if (event.data.startsWith(TEXT_MEDIA_PREFIX)) {
-            try {
-              void processMediaPacket(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length)));
-            } catch (e: any) {
-              setError(`Falha ao reconstruir vídeo recebido: ${e?.message ?? e}`);
-            }
+            try { void processMediaPacket(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length))); }
+            catch (e: any) { setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`); }
             return;
           }
 
@@ -418,22 +549,26 @@ function App() {
             const m = JSON.parse(event.data) as RelayControl;
             if (m.type === 'status') {
               setLive(m.live);
-              if (!m.live) { setHasVideo(false); resetTimeline(); }
+              if (!m.live) {
+                setHasVideo(false);
+                resetTimeline();
+                closeVideoDecoder();
+              }
             } else if (m.type === 'viewer-count') {
               setViewers(m.count);
             } else if (m.type === 'pong') {
+              lastPongRef.current = Date.now();
               setLatency(Math.max(0, Date.now() - m.sentAt));
             } else if (m.type === 'stream-config') {
               configRef.current = m;
               setConfig(m);
               setHasVideo(false);
+              setError('');
               resetTimeline();
-              try { videoDecoder.current?.close?.(); } catch { }
-              videoDecoder.current = null;
-              videoCodecRef.current = '';
-              videoPacketCount.current = 0;
+              closeVideoDecoder();
               setVideoPackets(0);
               configureAudio(m);
+              requestKeyframe('stream-config');
             } else if (m.type === 'cursor') {
               const el = cursorRef.current;
               if (!el) return;
@@ -452,63 +587,114 @@ function App() {
           return;
         }
 
-        // Compatibilidade: fora do Discord o relay ainda pode enviar mídia binária.
         if (event.data instanceof ArrayBuffer) {
           void processMediaPacket(event.data);
         } else if (event.data instanceof Blob) {
           void event.data.arrayBuffer().then(ab => processMediaPacket(ab)).catch(() => setError('Falha ao ler pacote binário do relay.'));
-        } else if (ArrayBuffer.isView(event.data)) {
-          const view = event.data as ArrayBufferView;
-          void processMediaPacket(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer);
         }
       };
 
-      ws.onclose = (ev) => {
+      ws.onclose = () => {
         setRelayConnected(false);
-        setLive(false);
+        setHasVideo(false);
+        closeVideoDecoder();
         if (!disposed) {
-          if (ev.code === 1006 && location.hostname.endsWith('discordsays.com')) {
-            setError('A conexão com o relay caiu. Reconectando automaticamente.');
-          }
-          const delay = Math.min(4000, 600 * Math.pow(1.6, reconnectAttempt++));
+          reconnectsRef.current++;
+          const baseDelay = Math.min(10_000, 700 * Math.pow(2, Math.min(reconnectAttempt++, 4)));
+          const delay = baseDelay + Math.floor(Math.random() * 350);
           reconnectTimer.current = window.setTimeout(connect, delay);
         }
       };
+
       ws.onerror = () => { try { ws.close(); } catch { } };
     };
 
     connect();
-    const ping = window.setInterval(() => {
+
+    let heartbeatTick = 0;
+    const heartbeat = window.setInterval(() => {
       const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping', sentAt: Date.now() }));
-    }, 4000);
+      if (ws?.readyState !== WebSocket.OPEN) return;
+      const now = Date.now();
+      if (now - lastPongRef.current > 18_000) {
+        try { ws.close(4000, 'heartbeat-timeout'); } catch { }
+        return;
+      }
+      // Auto-response do Durable Object: mantém o socket vivo sem acordar a sala em ociosidade.
+      ws.send('ping');
+      if ((++heartbeatTick % 3) === 0 && configRef.current)
+        ws.send(JSON.stringify({ type: 'ping', sentAt: now }));
+    }, 6000);
+
+    const visibility = () => {
+      if (document.visibilityState === 'visible') requestKeyframe('viewer-visible');
+    };
+    document.addEventListener('visibilitychange', visibility);
 
     return () => {
       disposed = true;
-      window.clearInterval(ping);
+      window.clearInterval(heartbeat);
+      document.removeEventListener('visibilitychange', visibility);
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
       try { wsRef.current?.close(); } catch { }
-      try { videoDecoder.current?.close?.(); } catch { }
+      closeVideoDecoder();
       try { audioDecoder.current?.close?.(); } catch { }
       try { audioContext.current?.close(); } catch { }
     };
-  }, [room, configureAudio, processMediaPacket, resetTimeline]);
+  }, [closeVideoDecoder, configureAudio, processMediaPacket, requestKeyframe, resetTimeline, room]);
+
+  React.useEffect(() => {
+    const interval = window.setInterval(() => {
+      const total = packetCounterRef.current;
+      const rate = total - packetRateBaseRef.current;
+      packetRateBaseRef.current = total;
+      setDiagnostics({
+        packetsPerSec: rate,
+        decodeQueue: Number(videoDecoder.current?.decodeQueueSize ?? 0),
+        codec: videoCodecRef.current || configRef.current?.videoCodecString || '—',
+        reconnects: reconnectsRef.current,
+        keyframes: keyframeCounterRef.current,
+        dropped: droppedCounterRef.current,
+        resets: decoderResetsRef.current
+      });
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   React.useEffect(() => {
     localStorage.setItem('aktela-volume', String(volume));
     if (gainNode.current) gainNode.current.gain.value = muted ? 0 : volume / 100;
   }, [volume, muted]);
 
+  React.useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        setDiagnosticsOpen(v => !v);
+      } else if (e.key === 'Escape') {
+        if (diagnosticsOpen) setDiagnosticsOpen(false);
+        else setImmersive(false);
+      }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [diagnosticsOpen]);
+
   const copy = async () => {
     const done = () => { setCopied(true); window.setTimeout(() => setCopied(false), 1000); };
     try { await navigator.clipboard.writeText(room); done(); return; } catch { }
     const t = document.createElement('textarea');
-    t.value = room; t.style.position = 'fixed'; t.style.left = '-9999px'; document.body.appendChild(t); t.select();
+    t.value = room;
+    t.style.position = 'fixed';
+    t.style.left = '-9999px';
+    document.body.appendChild(t);
+    t.select();
     try { if (document.execCommand('copy')) done(); } finally { t.remove(); }
   };
 
   const enterImmersive = React.useCallback(() => {
     setFit('contain');
+    setHud(true);
     setImmersive(true);
   }, []);
 
@@ -525,12 +711,6 @@ function App() {
   }, [immersive]);
 
   React.useEffect(() => {
-    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setImmersive(false); };
-    window.addEventListener('keydown', key);
-    return () => window.removeEventListener('keydown', key);
-  }, []);
-
-  React.useEffect(() => {
     const player = playerRef.current;
     const plane = videoPlaneRef.current;
     if (!player || !plane) return;
@@ -538,12 +718,10 @@ function App() {
     const update = () => {
       const rect = player.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
-
       const sourceW = Math.max(1, config?.width ?? 16);
       const sourceH = Math.max(1, config?.height ?? 9);
       const aspect = sourceW / sourceH;
       const containerAspect = rect.width / rect.height;
-
       let width: number;
       let height: number;
 
@@ -565,8 +743,8 @@ function App() {
         }
       }
 
-      plane.style.width = `${Math.ceil(width)}px`;
-      plane.style.height = `${Math.ceil(height)}px`;
+      plane.style.width = `${Math.max(1, Math.floor(width))}px`;
+      plane.style.height = `${Math.max(1, Math.floor(height))}px`;
     };
 
     update();
@@ -579,25 +757,41 @@ function App() {
     };
   }, [config?.width, config?.height, fit, immersive]);
 
-  const status = !discordReady ? 'Conectando ao Discord' : !relayConnected ? 'Reconectando ao relay' : live ? 'Ao vivo' : 'Aguardando Capture';
+  const codecError = error.toLowerCase().includes('codec') || error.toLowerCase().includes('decod');
+  const status = !discordReady
+    ? 'Conectando ao Discord'
+    : !relayConnected
+      ? 'Reconectando ao relay'
+      : codecError
+        ? 'Erro de codec'
+        : !live
+          ? 'Aguardando Capture'
+          : !capabilitiesReady
+            ? 'Negociando compatibilidade'
+            : !hasVideo
+              ? (videoPackets > 0 ? 'Preparando vídeo' : 'Aguardando vídeo')
+              : config?.compatibilityMode
+                ? 'Modo compatibilidade'
+                : 'Ao vivo';
+
   const health = !relayConnected ? 'Offline' : latency === 0 ? 'Conectando' : latency < 120 ? 'Excelente' : latency < 260 ? 'Boa' : latency < 450 ? 'Alta latência' : 'Instável';
   const quality = config ? `${config.height >= 1080 ? '1080p' : '720p'} · ${config.fps} FPS` : '—';
 
   return <main className="page"><section className={`shell ${immersive ? 'immersive' : ''}`}>
     <header className="topbar">
       <div className="brand"><div className="logo">AK</div><div><h1>AKTela</h1><p>Compartilhamento em baixa latência</p></div></div>
-      <div className={`connection ${relayConnected ? 'ok' : ''}`}><span className="dot"/><span>{status}</span></div>
+      <button className={`connection ${relayConnected ? 'ok' : ''}`} onClick={() => setDiagnosticsOpen(true)} title="Abrir diagnóstico"><span className="dot"/><span>{status}</span></button>
     </header>
 
     <div ref={playerRef} className={`player ${immersive && hud ? 'hud-visible' : ''}`} onDoubleClick={toggleImmersive} onPointerMove={showHud}>
-      <div className={`surface ${fit}`}>
+      <div className="surface">
         <div ref={videoPlaneRef} className="video-plane">
           <canvas ref={canvasRef} className={hasVideo ? 'frame visible' : 'frame'} width={config?.width ?? 1280} height={config?.height ?? 720}/>
           <div ref={cursorRef} className="remote-cursor" style={{ display: 'none' }}><svg viewBox="0 0 32 32"><path d="M4 2.5v24.2l6.35-5.95 4.45 9.35 4.3-2.05-4.35-9.1h8.95L4 2.5Z"/></svg></div>
         </div>
       </div>
 
-      {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{live ? (videoPackets > 0 ? 'Preparando o primeiro quadro' : 'Aguardando vídeo do Capture') : 'Pronto para receber uma transmissão'}</h2><p>{live ? (videoPackets > 0 ? 'Os dados de vídeo já chegaram. O decoder está sincronizando o quadro-chave.' : 'A conexão e a sala estão ativas; aguardando o primeiro pacote de mídia.') : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
+      {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{status}</h2><p>{live ? (videoPackets > 0 ? 'Os dados chegaram; aguardando um quadro-chave decodificável.' : 'A sala está ativa e pronta para o primeiro pacote de vídeo.') : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
 
       {!immersive && <>
         <div className="live-badge"><span className={`live-dot ${live ? 'active' : ''}`}/>{live ? 'AO VIVO' : 'AGUARDANDO'}</div>
@@ -620,7 +814,26 @@ function App() {
 
     {error && <div className="error"><span>{error}</span><button onClick={() => setError('')}>Fechar</button></div>}
 
-    <footer className="bottom"><div className="pair-card"><div><span>Código do Capture</span><strong>{room}</strong></div><button onClick={copy}><Icon name="copy"/><span>{copied ? 'Copiado' : 'Copiar'}</span></button></div><div className="session-stats"><div><span>Conexão</span><strong>{health}</strong></div><div><span>Assistindo</span><strong>{viewers}</strong></div><div><span>Perfil</span><strong>{config?.preset ?? '—'}</strong></div></div></footer>
+    <footer className="bottom"><div className="pair-card"><div><span>Código do Capture</span><strong>{room}</strong></div><button onClick={copy}><Icon name="copy"/><span>{copied ? 'Copiado' : 'Copiar'}</span></button></div><div className="session-stats"><button onClick={() => setDiagnosticsOpen(true)}><span>Conexão</span><strong>{health}</strong></button><div><span>Assistindo</span><strong>{viewers}</strong></div><div><span>Perfil</span><strong>{config?.compatibilityMode ? 'Compatível' : config?.preset ?? '—'}</strong></div></div></footer>
+
+    {diagnosticsOpen && <div className="diagnostics-backdrop" onMouseDown={() => setDiagnosticsOpen(false)}><section className="diagnostics" onMouseDown={e => e.stopPropagation()}>
+      <header><div><h2>Diagnóstico</h2><p>Ctrl + Alt + D</p></div><button onClick={() => setDiagnosticsOpen(false)}><Icon name="close"/></button></header>
+      <div className="diag-grid">
+        <div><span>Relay</span><strong>{relayConnected ? 'Conectado' : 'Desconectado'}</strong></div>
+        <div><span>Ping</span><strong>{latency ? `${latency} ms` : '—'}</strong></div>
+        <div><span>Codec</span><strong>{diagnostics.codec}</strong></div>
+        <div><span>Resolução</span><strong>{config ? `${config.width}×${config.height}` : '—'}</strong></div>
+        <div><span>Pacotes/s</span><strong>{diagnostics.packetsPerSec}</strong></div>
+        <div><span>Fila decoder</span><strong>{diagnostics.decodeQueue}</strong></div>
+        <div><span>Keyframes</span><strong>{diagnostics.keyframes}</strong></div>
+        <div><span>Descartados</span><strong>{diagnostics.dropped}</strong></div>
+        <div><span>Resets decoder</span><strong>{diagnostics.resets}</strong></div>
+        <div><span>Reconexões</span><strong>{diagnostics.reconnects}</strong></div>
+        <div><span>Capacidades</span><strong>{capabilitiesReady ? 'Enviadas' : 'Verificando'}</strong></div>
+        <div><span>Transporte</span><strong>WebSocket texto</strong></div>
+      </div>
+      <button className="request-key" onClick={() => requestKeyframe('manual-diagnostic')}>Solicitar novo quadro-chave</button>
+    </section></div>}
   </section></main>;
 }
 
