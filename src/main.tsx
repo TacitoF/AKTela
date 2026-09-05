@@ -121,7 +121,7 @@ async function probeCapabilities(): Promise<ViewerCapabilities> {
     for (const mode of Object.keys(MODE_SPECS) as ModeKey[]) {
       const spec = MODE_SPECS[mode];
       const supported: CapabilityToken[] = [];
-      const tokens: CapabilityToken[] = ['h264-baseline', 'h264-main', 'h264-high', 'vp8'];
+      const tokens: CapabilityToken[] = ['h264-main', 'h264-baseline', 'h264-high', 'vp8'];
       for (const token of tokens) {
         try {
           const result = await VideoDecoderCtor.isConfigSupported({
