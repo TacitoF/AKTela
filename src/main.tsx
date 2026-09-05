@@ -224,7 +224,12 @@ function App() {
   const [immersive, setImmersive] = React.useState(false);
   const [hud, setHud] = React.useState(true);
   const [muted, setMuted] = React.useState(false);
-  const [volume, setVolume] = React.useState(() => Number(localStorage.getItem('aktela-volume') ?? '80'));
+  const [volume, setVolume] = React.useState(() => {
+    try {
+      const value = Number(localStorage.getItem('aktela-volume') ?? '80');
+      return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 80;
+    } catch { return 80; }
+  });
   const [audioReady, setAudioReady] = React.useState(false);
   const [videoPackets, setVideoPackets] = React.useState(0);
   const [capabilitiesReady, setCapabilitiesReady] = React.useState(false);
@@ -289,6 +294,7 @@ function App() {
 
   const configureVideo = React.useCallback(async (cfg: StreamConfig, codec: string) => {
     closeVideoDecoder();
+    const generation = videoGenerationRef.current;
     const VideoDecoderCtor = (window as any).VideoDecoder;
     if (!VideoDecoderCtor) {
       setError('Este cliente do Discord não oferece WebCodecs para vídeo.');
@@ -305,6 +311,7 @@ function App() {
     try {
       if (typeof VideoDecoderCtor.isConfigSupported === 'function') {
         const support = await VideoDecoderCtor.isConfigSupported(candidate);
+        if (generation !== videoGenerationRef.current || configRef.current !== cfg) return false;
         if (!support?.supported) {
           setError(`Codec não suportado neste cliente: ${codec}. O AKTela solicitará modo compatibilidade.`);
           rejectCodecCapability(cfg, codec);
@@ -320,7 +327,6 @@ function App() {
       return false;
     }
 
-    const generation = videoGenerationRef.current;
     const decoder = new VideoDecoderCtor({
       output: (frame: any) => {
         const ts = Number(frame.timestamp ?? 0);
@@ -352,6 +358,7 @@ function App() {
         wait > 3 ? window.setTimeout(draw, Math.min(wait, 70)) : draw();
       },
       error: (e: any) => {
+        if (generation !== videoGenerationRef.current) return;
         decoderResetsRef.current++;
         setHasVideo(false);
         setError(`Falha ao decodificar ${codec}: ${e?.message ?? e}`);
@@ -446,13 +453,14 @@ function App() {
       for (let i = 0; i < PROTOCOL_MAGIC.length; i++) if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
 
       const kind = dv.getUint8(5);
+      if (dv.getUint8(4) !== 5 || (kind !== 1 && kind !== 2)) return;
       const key = (dv.getUint8(6) & 1) !== 0;
       const lo = dv.getUint32(8, true);
       const hi = dv.getInt32(12, true);
       const ts = hi * 4294967296 + lo;
       const duration = dv.getInt32(16, true);
       const len = dv.getInt32(20, true);
-      if (len < 0 || HEADER + len > ab.byteLength) return;
+      if (len <= 0 || HEADER + len !== ab.byteLength || duration <= 0 || ts < 0) return;
 
       const payload = new Uint8Array(ab, HEADER, len);
       ensureTimeline(ts);
@@ -486,6 +494,7 @@ function App() {
           if (videoDecoder.current?.state !== 'configured' || videoCodecRef.current !== codec) {
             if (!await configureVideo(cfg, codec)) return;
           }
+          if (configRef.current !== cfg) return;
           waitForKeyframe.current = false;
         }
 
@@ -575,6 +584,7 @@ function App() {
       };
 
       ws.onmessage = (event) => {
+        if (disposed || wsRef.current !== ws) return;
         if (typeof event.data === 'string') {
           if (event.data === 'pong') {
             lastPongRef.current = Date.now();
@@ -656,12 +666,21 @@ function App() {
       };
 
       ws.onclose = () => {
+        if (disposed || wsRef.current !== ws) return;
         relayConnectedRef.current = false;
         remoteCursorVisibleRef.current = false;
         if (cursorRef.current) cursorRef.current.style.display = 'none';
         setRelayConnected(false);
+        liveRef.current = false;
+        setLive(false);
         setHasVideo(false);
+        configRef.current = null;
+        setConfig(null);
+        setVideoPackets(0);
+        resetTimeline();
         closeVideoDecoder();
+        try { audioDecoder.current?.close?.(); } catch { }
+        audioDecoder.current = null;
         if (!disposed) {
           reconnectsRef.current++;
           const baseDelay = Math.min(10_000, 700 * Math.pow(2, Math.min(reconnectAttempt++, 4)));
@@ -766,7 +785,7 @@ function App() {
   }, [closeVideoDecoder, requestKeyframe, resetTimeline]);
 
   React.useEffect(() => {
-    localStorage.setItem('aktela-volume', String(volume));
+    try { localStorage.setItem('aktela-volume', String(volume)); } catch { }
     if (gainNode.current) gainNode.current.gain.value = muted ? 0 : volume / 100;
   }, [volume, muted]);
 
