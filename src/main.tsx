@@ -1111,11 +1111,31 @@ function MultiApp() {
 
   const visibleStreams = focusedStream ? streams.filter(stream => stream.id === focusedStream) : streams;
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(room);
+    const done = () => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1400);
+    };
+    try {
+      await navigator.clipboard.writeText(room);
+      done();
+      return;
     } catch { }
+
+    // O Discord pode bloquear a Clipboard API dentro do iframe da Activity.
+    // Nesse caso, usa a cópia compatível com o WebView/Chromium incorporado.
+    const textarea = document.createElement('textarea');
+    textarea.value = room;
+    textarea.readOnly = true;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      if (document.execCommand('copy')) done();
+    } finally {
+      textarea.remove();
+    }
   };
 
   return <main className="multi-page"><section className="multi-shell">
