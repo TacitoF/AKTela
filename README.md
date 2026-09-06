@@ -1,6 +1,9 @@
-# AKTela Activity 2.3
+# AKTela Activity 2.3.3
 
 Cliente de visualização executado como Discord Activity.
+
+- O player tenta liberar o áudio automaticamente e mostra o estado realmente mutado quando o Discord exige um clique para iniciar a reprodução.
+- O primeiro clique no volume libera o áudio sem inverter o controle de volta para mudo.
 
 - Negocia H.264 Main, Baseline, High ou VP8 conforme os recursos de todos os espectadores.
 - Valida o codec real do SPS e o envelope AKV5 antes da decodificação.
