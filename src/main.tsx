@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { DiscordSDK, patchUrlMappings } from '@discord/embedded-app-sdk';
 import './style.css';
+import './enhancements.css';
 
 const CLIENT_ID = '1545406549105713182';
 const RELAY_TARGET = 'aktela-relay.tacito1-filho.workers.dev';
@@ -362,7 +363,10 @@ function App() {
         if (generation !== videoGenerationRef.current) return;
         decoderResetsRef.current++;
         setHasVideo(false);
-        setError(`Falha ao decodificar ${codec}: ${e?.message ?? e}`);
+        const decoderMessage = String(e?.message ?? e);
+        setError(decoderMessage.toLowerCase().includes('unsupported configuration')
+          ? `Este dispositivo rejeitou ${codec}. Tentando H.264 Baseline ou VP8 automaticamente.`
+          : `Falha ao decodificar ${codec}: ${decoderMessage}`);
         rejectCodecCapability(cfg, codec);
         closeVideoDecoder();
         const ws = wsRef.current;
@@ -913,6 +917,8 @@ function App() {
       ? 'Reconectando ao relay'
       : codecError
         ? 'Erro de codec'
+        : diagnostics.stalled
+          ? 'Recuperando vídeo'
         : !live
           ? 'Aguardando Capture'
           : !capabilitiesReady
@@ -940,7 +946,7 @@ function App() {
         </div>
       </div>
 
-      {!hasVideo && <div className="empty-state"><div className="empty-icon"><Icon name="monitor"/></div><h2>{status}</h2><p>{live ? (videoPackets > 0 ? 'Os dados chegaram; aguardando um quadro-chave decodificável.' : 'A sala está ativa e pronta para o primeiro pacote de vídeo.') : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
+      {!hasVideo && <div className={`empty-state ${diagnostics.stalled ? 'recovering' : ''}`}><div className="empty-icon"><Icon name="monitor"/></div><h2>{status}</h2><p>{diagnostics.stalled ? 'A imagem parou de atualizar. Solicitamos um novo quadro e um modo de vídeo compatível automaticamente.' : live ? (videoPackets > 0 ? 'Os dados chegaram; aguardando um quadro-chave decodificável.' : 'A sala está ativa e pronta para o primeiro pacote de vídeo.') : 'Abra o AKTela Capture, use o código abaixo e inicie o compartilhamento.'}</p></div>}
 
       {!immersive && <>
         <div className="live-badge"><span className={`live-dot ${live ? 'active' : ''}`}/>{live ? 'AO VIVO' : 'AGUARDANDO'}</div>
@@ -969,7 +975,7 @@ function App() {
       <header><div><h2>Diagnóstico</h2><p>Ctrl + Alt + D</p></div><button onClick={() => setDiagnosticsOpen(false)}><Icon name="close"/></button></header>
       <div className="diag-grid">
         <div><span>Relay</span><strong>{relayConnected ? 'Conectado' : 'Desconectado'}</strong></div>
-        <div><span>Ping</span><strong>{latency ? `${latency} ms` : '—'}</strong></div>
+        <div><span>Ping</span><strong className={latency === 0 ? '' : latency < 260 ? 'metric-good' : latency < 450 ? 'metric-warn' : 'metric-bad'}>{latency ? `${latency} ms` : '—'}</strong></div>
         <div><span>Codec</span><strong>{diagnostics.codec}</strong></div>
         <div><span>Resolução</span><strong>{config ? `${config.width}×${config.height}` : '—'}</strong></div>
         <div><span>Pacotes/s</span><strong>{diagnostics.packetsPerSec}</strong></div>
