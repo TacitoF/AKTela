@@ -56,6 +56,8 @@ type RelayControl =
   | { type: 'cursor'; x: number; y: number; visible: boolean; w?: number; h?: number; hx?: number; hy?: number }
   | StreamConfig;
 
+type StreamSummary = { id: string; slot: number; label: string };
+
 const MODE_SPECS: Record<ModeKey, { width: number; height: number; fps: number; level: string }> = {
   '720p30': { width: 1280, height: 720, fps: 30, level: '1F' },
   '720p60': { width: 1280, height: 720, fps: 60, level: '20' },
@@ -85,9 +87,14 @@ function roomCode(instanceId: string) {
   return out;
 }
 
-function viewerRelayUrl(room: string, viewerId: string) {
+function viewerRelayUrl(room: string, viewerId: string, streamId: string, receiveAudio: boolean) {
   const base = location.hostname.endsWith('discordsays.com') ? PROXIED_RELAY : DIRECT_RELAY;
-  return `${base}?role=viewer&room=${encodeURIComponent(room)}&transport=text&viewerId=${encodeURIComponent(viewerId)}`;
+  return `${base}?role=viewer&room=${encodeURIComponent(room)}&transport=text&viewerId=${encodeURIComponent(viewerId)}&streamId=${encodeURIComponent(streamId)}&audio=${receiveAudio ? '1' : '0'}`;
+}
+
+function observerRelayUrl(room: string, viewerId: string) {
+  const base = location.hostname.endsWith('discordsays.com') ? PROXIED_RELAY : DIRECT_RELAY;
+  return `${base}?role=viewer&room=${encodeURIComponent(room)}&transport=text&observe=1&viewerId=${encodeURIComponent(viewerId)}`;
 }
 
 function base64ToArrayBuffer(value: string) {
@@ -170,8 +177,7 @@ function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'copy' | 'fit
   return <svg {...p}><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>;
 }
 
-function App() {
-  const room = React.useMemo(() => roomCode(discordSdk.instanceId), []);
+function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }: { room: string; streamId: string; embedded?: boolean; initialMuted?: boolean }) {
   const viewerIdRef = React.useRef(typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const playerRef = React.useRef<HTMLDivElement>(null);
   const videoPlaneRef = React.useRef<HTMLDivElement>(null);
@@ -212,8 +218,9 @@ function App() {
   const liveRef = React.useRef(false);
   const relayConnectedRef = React.useRef(false);
   const immersiveRef = React.useRef(false);
+  const mutedRef = React.useRef(initialMuted);
 
-  const [discordReady, setDiscordReady] = React.useState(false);
+  const [discordReady, setDiscordReady] = React.useState(embedded);
   const [relayConnected, setRelayConnected] = React.useState(false);
   const [live, setLive] = React.useState(false);
   const [hasVideo, setHasVideo] = React.useState(false);
@@ -226,7 +233,7 @@ function App() {
   const [fit, setFit] = React.useState<'contain' | 'cover'>('contain');
   const [immersive, setImmersive] = React.useState(false);
   const [hud, setHud] = React.useState(true);
-  const [muted, setMuted] = React.useState(false);
+  const [muted, setMuted] = React.useState(initialMuted);
   const [volume, setVolume] = React.useState(() => {
     try {
       const value = Number(localStorage.getItem('aktela-volume') ?? '80');
@@ -570,10 +577,14 @@ function App() {
   }, [closeVideoDecoder, configureVideo, ensureTimeline, requestKeyframe]);
 
   React.useEffect(() => {
+    if (embedded) {
+      setDiscordReady(true);
+      return;
+    }
     let active = true;
     discordSdk.ready().then(() => active && setDiscordReady(true)).catch(() => active && setDiscordReady(false));
     return () => { active = false; };
-  }, []);
+  }, [embedded]);
 
   React.useEffect(() => { liveRef.current = live; }, [live]);
   React.useEffect(() => { relayConnectedRef.current = relayConnected; }, [relayConnected]);
@@ -597,7 +608,7 @@ function App() {
 
     const connect = () => {
       if (disposed) return;
-      const ws = new WebSocket(viewerRelayUrl(room, viewerIdRef.current));
+      const ws = new WebSocket(viewerRelayUrl(room, viewerIdRef.current, streamId, !initialMuted));
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
@@ -608,6 +619,7 @@ function App() {
         setRelayConnected(true);
         setError('');
         if (capabilitiesRef.current) ws.send(JSON.stringify(capabilitiesRef.current));
+        ws.send(JSON.stringify({ type: 'set-audio', enabled: !mutedRef.current }));
         lastPingSentAtRef.current = Date.now();
         ws.send('ping');
         requestKeyframe('viewer-connected');
@@ -773,7 +785,7 @@ function App() {
       try { audioDecoder.current?.close?.(); } catch { }
       try { audioContext.current?.close(); } catch { }
     };
-  }, [closeVideoDecoder, configureAudio, processMediaPacket, requestKeyframe, resetTimeline, room]);
+  }, [closeVideoDecoder, configureAudio, initialMuted, processMediaPacket, requestKeyframe, resetTimeline, room, streamId]);
 
   React.useEffect(() => {
     let healthTick = 0;
@@ -833,8 +845,11 @@ function App() {
   }, [closeVideoDecoder, requestKeyframe, resetTimeline]);
 
   React.useEffect(() => {
+    mutedRef.current = muted;
     try { localStorage.setItem('aktela-volume', String(volume)); } catch { }
     if (gainNode.current) gainNode.current.gain.value = muted ? 0 : volume / 100;
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'set-audio', enabled: !muted }));
   }, [volume, muted]);
 
   React.useEffect(() => {
@@ -968,7 +983,7 @@ function App() {
   const quality = config ? `${config.height >= 1080 ? '1080p' : '720p'} · ${config.fps} FPS` : '—';
   const audioMuted = muted || !audioReady;
 
-  return <main className="page"><section className={`shell ${immersive ? 'immersive' : ''}`}>
+  return <main className={`page ${embedded ? 'embedded-page' : ''}`}><section className={`shell ${embedded ? 'embedded-player' : ''} ${immersive ? 'immersive' : ''}`}>
     <header className="topbar">
       <div className="brand"><div className="logo">AK</div><div><h1>AKTela</h1><p>Compartilhamento em baixa latência</p></div></div>
       <button className={`connection ${relayConnected ? 'ok' : ''}`} onClick={() => setDiagnosticsOpen(true)} title="Abrir diagnóstico"><span className="dot"/><span>{status}</span></button>
@@ -1030,4 +1045,98 @@ function App() {
   </section></main>;
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(<App/>);
+function MultiApp() {
+  const room = React.useMemo(() => roomCode(discordSdk.instanceId), []);
+  const observerId = React.useRef(typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `observer-${Date.now()}`);
+  const [discordReady, setDiscordReady] = React.useState(false);
+  const [relayConnected, setRelayConnected] = React.useState(false);
+  const [streams, setStreams] = React.useState<StreamSummary[]>([]);
+  const [focusedStream, setFocusedStream] = React.useState<string | null>(null);
+  const [copied, setCopied] = React.useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    discordSdk.ready().then(() => active && setDiscordReady(true)).catch(() => active && setDiscordReady(false));
+    return () => { active = false; };
+  }, []);
+
+  React.useEffect(() => {
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let retry: number | null = null;
+    let attempts = 0;
+
+    const connect = () => {
+      if (disposed) return;
+      const ws = new WebSocket(observerRelayUrl(room, observerId.current));
+      socket = ws;
+      ws.onopen = () => {
+        attempts = 0;
+        setRelayConnected(true);
+        ws.send('ping');
+      };
+      ws.onmessage = event => {
+        if (typeof event.data !== 'string' || event.data === 'pong') return;
+        try {
+          const message = JSON.parse(event.data) as { type?: string; streams?: StreamSummary[] };
+          if (message.type === 'stream-list' && Array.isArray(message.streams)) {
+            setStreams(message.streams.slice(0, 3));
+          }
+        } catch { }
+      };
+      ws.onclose = () => {
+        if (disposed || socket !== ws) return;
+        setRelayConnected(false);
+        const delay = Math.min(10_000, 700 * Math.pow(2, Math.min(attempts++, 4))) + Math.floor(Math.random() * 300);
+        retry = window.setTimeout(connect, delay);
+      };
+      ws.onerror = () => { try { ws.close(); } catch { } };
+    };
+
+    connect();
+    const heartbeat = window.setInterval(() => {
+      if (socket?.readyState === WebSocket.OPEN) socket.send('ping');
+    }, 6000);
+    return () => {
+      disposed = true;
+      window.clearInterval(heartbeat);
+      if (retry) window.clearTimeout(retry);
+      try { socket?.close(); } catch { }
+    };
+  }, [room]);
+
+  React.useEffect(() => {
+    if (focusedStream && !streams.some(stream => stream.id === focusedStream)) setFocusedStream(null);
+  }, [focusedStream, streams]);
+
+  const visibleStreams = focusedStream ? streams.filter(stream => stream.id === focusedStream) : streams;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(room);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch { }
+  };
+
+  return <main className="multi-page"><section className="multi-shell">
+    <header className="multi-topbar">
+      <div className="brand"><div className="logo">AK</div><div><h1>AKTela</h1><p>Até 3 transmissões simultâneas</p></div></div>
+      <div className="multi-actions">
+        {focusedStream && <button className="back-grid" onClick={() => setFocusedStream(null)}>Voltar à grade</button>}
+        <div className={`connection ${relayConnected ? 'ok' : ''}`}><span className="dot"/><span>{discordReady ? (relayConnected ? `${streams.length}/3 telas` : 'Reconectando') : 'Conectando'}</span></div>
+      </div>
+    </header>
+
+    <div className={`stream-grid count-${visibleStreams.length} ${focusedStream ? 'focused' : ''}`}>
+      {visibleStreams.map(stream => <article className="stream-card" key={`${stream.id}-${focusedStream ? 'focus' : 'grid'}`}>
+        <header className="stream-card-header"><strong>{stream.label}</strong><button onClick={() => setFocusedStream(stream.id)} title={`Destacar ${stream.label}`} aria-label={`Destacar ${stream.label}`}><Icon name="fullscreen"/></button></header>
+        <div className="stream-card-player"><StreamPlayer room={room} streamId={stream.id} embedded initialMuted={!focusedStream}/></div>
+      </article>)}
+      {visibleStreams.length === 0 && <div className="multi-empty"><div className="empty-icon"><Icon name="monitor"/></div><h2>Aguardando transmissão</h2><p>Abra o AKTela Capture, cole o código abaixo e inicie o compartilhamento.</p></div>}
+    </div>
+
+    <footer className="multi-bottom"><div className="pair-card"><div><span>Código do Capture</span><strong>{room}</strong></div><button onClick={copy}><Icon name="copy"/><span>{copied ? 'Copiado' : 'Copiar'}</span></button></div><p>{focusedStream ? 'Somente a tela destacada usa banda.' : streams.length > 1 ? 'Modo leve: cada tela limitada a 720p · 30 FPS.' : 'As próximas telas aparecerão automaticamente.'}</p></footer>
+  </section></main>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')!).render(<MultiApp/>);
