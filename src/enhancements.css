@@ -1,0 +1,23 @@
+.player-controls {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.empty-state.recovering .empty-icon {
+  color: #f2bc57;
+  border-color: #6a5428;
+  animation: recover-pulse 1.15s ease-in-out infinite;
+}
+.metric-good { color: #46d59b; }
+.metric-warn { color: #f2bc57; }
+.metric-bad { color: #ff7b89; }
+@keyframes recover-pulse {
+  50% { transform: scale(1.06); box-shadow: 0 0 0 8px #f2bc5710; }
+}
+@media (max-width: 760px) {
+  .session-stats { display: flex; gap: 5px; }
+  .session-stats > div, .session-stats > button { min-width: 0; padding: 6px 7px; }
+  .session-stats > div:nth-child(3) { display: none; }
+  .session-stats span { font-size: 8px; }
+  .bottom { gap: 8px; justify-content: space-between; }
+  .pair-card { gap: 7px; }
+  .pair-card button { padding: 0 9px; }
+}

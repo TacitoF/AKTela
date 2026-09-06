@@ -10,3 +10,6 @@ Cliente de visualização executado como Discord Activity.
 - Envia FPS reproduzido, fila, descartes e estado de travamento ao Capture.
 - Responde à medição Capture → espectador → Capture.
 - Oculta o cursor remoto inativo após 1,6 segundo no modo tela cheia.
+
+- Explica o fallback automático quando um driver rejeita H.264 depois da verificação inicial.
+- Mostra “Recuperando vídeo” durante travamentos e preserva métricas essenciais em telas menores.
