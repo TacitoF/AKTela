@@ -166,11 +166,14 @@ async function probeCapabilities(): Promise<ViewerCapabilities> {
   return { type: 'viewer-capabilities', protocol: 5, modes, audioOpus };
 }
 
-function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'copy' | 'fit' | 'monitor' | 'close' }) {
+function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'collapse' | 'focus' | 'grid' | 'copy' | 'fit' | 'monitor' | 'close' }) {
   const p = { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
   if (name === 'volume') return <svg {...p}><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="M15 9.2a4 4 0 0 1 0 5.6"/><path d="M17.8 6.5a8 8 0 0 1 0 11"/></svg>;
   if (name === 'mute') return <svg {...p}><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="m16 9 5 5M21 9l-5 5"/></svg>;
   if (name === 'fullscreen') return <svg {...p}><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>;
+  if (name === 'collapse') return <svg {...p}><path d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6"/></svg>;
+  if (name === 'focus') return <svg {...p}><rect x="3" y="6" width="14" height="12" rx="2"/><path d="M14 3h7v7M21 3l-8 8"/></svg>;
+  if (name === 'grid') return <svg {...p}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>;
   if (name === 'copy') return <svg {...p}><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>;
   if (name === 'fit') return <svg {...p}><path d="M8 5H5v3M16 5h3v3M8 19H5v-3M16 19h3v-3"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg>;
   if (name === 'close') return <svg {...p}><path d="m6 6 12 12M18 6 6 18"/></svg>;
@@ -1008,12 +1011,13 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
             <input className="volume" type="range" min="0" max="100" value={audioMuted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio().catch(() => setAudioReady(false)); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/>
             <span className="volume-value">{audioMuted ? 0 : volume}%</span>
           </>}</div>
-          <div className="control-right"><button className={`text-button fit-button ${fit === 'contain' ? 'safe' : 'cropped'}`} title={fit === 'contain' ? 'A tela inteira está visível; barras podem aparecer para preservar a proporção.' : 'Preenche o painel e pode recortar as bordas.'} onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Tela inteira' : 'Preencher (recorta)'}</span></button><button className="icon-button" onClick={enterImmersive}><Icon name="fullscreen"/></button></div>
+          <div className="control-right"><button className={`text-button fit-button ${fit === 'contain' ? 'safe' : 'cropped'}`} aria-pressed={fit === 'contain'} title={fit === 'contain' ? 'Imagem completa, sem cortes. Clique para preencher o painel.' : 'O painel está preenchido e as bordas podem ser cortadas. Clique para ajustar a imagem.'} onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Ajustar à tela' : 'Preencher painel'}</span></button><button className="text-button expand-player" onClick={enterImmersive} title="Expandir somente o player do AKTela"><Icon name="fullscreen"/><span>Expandir player</span></button></div>
         </div>
       </>}
 
       {immersive && <>
-        <button className="immersive-exit" onClick={() => setImmersive(false)} aria-label="Sair da tela cheia"><Icon name="fullscreen"/></button>
+        <button className="immersive-exit" onClick={() => setImmersive(false)} title="Voltar ao layout do AKTela (Esc)"><Icon name="collapse"/><span>Reduzir player</span></button>
+        <div className="immersive-hint" role="status"><strong>Player expandido</strong><span>Use “Reduzir player” ou pressione Esc para voltar.</span></div>
         {config?.audioEnabled && <div className="immersive-volume"><button className={`immersive-audio-button ${!audioReady ? 'awaiting-audio' : ''}`} onClick={toggleAudio} title={audioReady ? (muted ? 'Ativar áudio' : 'Silenciar') : 'Clique para ativar o áudio'} aria-label={audioReady ? (muted ? 'Ativar áudio' : 'Silenciar') : 'Ativar áudio'}><Icon name={audioMuted ? 'mute' : 'volume'}/></button><div className="immersive-volume-details"><input className="volume" type="range" min="0" max="100" value={audioMuted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio().catch(() => setAudioReady(false)); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/><span>{audioMuted ? 0 : volume}%</span></div></div>}
       </>}
     </div>
@@ -1142,14 +1146,16 @@ function MultiApp() {
     <header className="multi-topbar">
       <div className="brand"><div className="logo">AK</div><div><h1>AKTela</h1><p>Até 3 transmissões simultâneas</p></div></div>
       <div className="multi-actions">
-        {focusedStream && <button className="back-grid" onClick={() => setFocusedStream(null)}>Voltar à grade</button>}
         <div className={`connection ${relayConnected ? 'ok' : ''}`}><span className="dot"/><span>{discordReady ? (relayConnected ? `${streams.length}/3 telas` : 'Reconectando') : 'Conectando'}</span></div>
       </div>
     </header>
 
     <div className={`stream-grid count-${visibleStreams.length} ${focusedStream ? 'focused' : ''}`}>
       {visibleStreams.map(stream => <article className="stream-card" key={`${stream.id}-${focusedStream ? 'focus' : 'grid'}`}>
-        <header className="stream-card-header"><strong>{stream.label}</strong><button onClick={() => setFocusedStream(stream.id)} title={`Destacar ${stream.label}`} aria-label={`Destacar ${stream.label}`}><Icon name="fullscreen"/></button></header>
+        <header className="stream-card-header"><strong>{stream.label}</strong>{focusedStream
+          ? <button className="back-grid" onClick={() => setFocusedStream(null)} title="Voltar para todas as transmissões"><Icon name="grid"/><span>Voltar à grade</span></button>
+          : streams.length > 1 && <button className="focus-stream" onClick={() => setFocusedStream(stream.id)} title={`Exibir somente ${stream.label}`}><Icon name="focus"/><span>Destacar tela</span></button>}
+        </header>
         <div className="stream-card-player"><StreamPlayer room={room} streamId={stream.id} embedded initialMuted={!focusedStream}/></div>
       </article>)}
       {visibleStreams.length === 0 && <div className="multi-empty"><div className="empty-icon"><Icon name="monitor"/></div><h2>Aguardando transmissão</h2><p>Abra o AKTela Capture, cole o código abaixo e inicie o compartilhamento.</p></div>}

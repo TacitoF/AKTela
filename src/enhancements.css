@@ -46,8 +46,8 @@
 .multi-topbar { border-bottom: 1px solid #252a34; }
 .multi-topbar .brand { min-width: 0; }
 .multi-actions { display: flex; align-items: center; gap: 8px; }
-.back-grid, .stream-card-header button { border: 1px solid #303542; background: #20242d; color: #edf0f6; border-radius: 9px; cursor: pointer; }
-.back-grid { height: 36px; padding: 0 12px; }
+.back-grid, .stream-card-header button { border: 1px solid #303542; background: #20242d; color: #edf0f6; border-radius: 8px; cursor: pointer; }
+.back-grid { border-color: #3a6659 !important; background: #1c3931 !important; color: #b8f4df !important; }
 .stream-grid { min-height: 0; display: grid; gap: 8px; padding: 8px; background: #080a0f; }
 .stream-grid.count-1 { grid-template-columns: 1fr; }
 .stream-grid.count-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -56,7 +56,8 @@
 .stream-card { min-width: 0; min-height: 0; display: grid; grid-template-rows: 36px minmax(0, 1fr); overflow: hidden; border: 1px solid #292e39; border-radius: 12px; background: #0d1016; }
 .stream-card-header { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; background: #181b23; border-bottom: 1px solid #292e39; }
 .stream-card-header strong { font-size: 12px; }
-.stream-card-header button { width: 28px; height: 28px; display: grid; place-items: center; }
+.stream-card-header button { width: auto; height: 28px; padding: 0 9px; display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; }
+.stream-card-header .focus-stream { border-color: #5964be; background: #252a51; color: #dfe2ff; }
 .stream-card-header button svg { width: 15px; height: 15px; }
 .stream-card-player { min-height: 0; position: relative; }
 .embedded-page { height: 100%; padding: 0; }
@@ -65,7 +66,6 @@
 .embedded-player > .error { bottom: 0; }
 .stream-grid:not(.focused) .embedded-player .volume,
 .stream-grid:not(.focused) .embedded-player .volume-value,
-.stream-grid:not(.focused) .embedded-player .fit-button span,
 .stream-grid:not(.focused) .embedded-player .stream-meta { display: none; }
 .stream-grid:not(.focused) .embedded-player .player-controls { height: 44px; bottom: 8px; left: 8px; right: 8px; }
 .multi-empty { display: grid; place-content: center; text-align: center; color: #f6f7fb; }
@@ -88,6 +88,20 @@
   .stream-grid.count-3 { grid-template-rows: repeat(3, minmax(0, 1fr)); }
   .stream-grid.count-3 .stream-card:first-child { grid-column: auto; }
   .stream-card { grid-template-rows: 30px minmax(0, 1fr); }
-  .stream-card-header button { width: 24px; height: 24px; }
+  .stream-card-header button { height: 24px; padding: 0 7px; }
+  .embedded-player .fit-button span, .embedded-player .expand-player span { display: none; }
   .multi-bottom { justify-content: center; padding: 0 7px; }
+}
+
+.expand-player { border-color: #46516b; background: #252c39; }
+.shell.immersive { animation: immersive-enter .2s ease-out; }
+.immersive-exit { width: auto; height: 40px; padding: 0 13px; display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 750; opacity: .82; background: #20242ded; box-shadow: 0 8px 28px #0008; transition: opacity .15s, background .15s, transform .15s; }
+.immersive-exit:hover, .hud-visible .immersive-exit { opacity: 1; background: #2a303c; transform: translateY(-1px); }
+.immersive-hint { position: absolute; top: 18px; left: 50%; z-index: 10; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 9px 14px; border: 1px solid #353c49; border-radius: 10px; background: #12151bed; box-shadow: 0 8px 30px #0009; pointer-events: none; animation: immersive-guide 4s ease forwards; }
+.immersive-hint strong { font-size: 12px; }
+.immersive-hint span { color: #aeb6c5; font-size: 10px; white-space: nowrap; }
+@keyframes immersive-enter { from { opacity: .45; transform: scale(.985); } to { opacity: 1; transform: scale(1); } }
+@keyframes immersive-guide { 0%, 68% { opacity: 1; transform: translateX(-50%) translateY(0); } 100% { opacity: 0; transform: translateX(-50%) translateY(-6px); visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) {
+  .shell.immersive, .immersive-hint { animation-duration: .01ms; }
 }
