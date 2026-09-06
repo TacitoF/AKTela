@@ -192,6 +192,7 @@ function App() {
   const videoCodecRef = React.useRef('');
   const capabilitiesRef = React.useRef<ViewerCapabilities | null>(null);
   const lastPongRef = React.useRef(0);
+  const lastPingSentAtRef = React.useRef(0);
   const lastKeyframeRequestRef = React.useRef(0);
   const reconnectsRef = React.useRef(0);
   const packetCounterRef = React.useRef(0);
@@ -579,6 +580,7 @@ function App() {
         setRelayConnected(true);
         setError('');
         if (capabilitiesRef.current) ws.send(JSON.stringify(capabilitiesRef.current));
+        lastPingSentAtRef.current = Date.now();
         ws.send('ping');
         requestKeyframe('viewer-connected');
       };
@@ -588,6 +590,12 @@ function App() {
         if (typeof event.data === 'string') {
           if (event.data === 'pong') {
             lastPongRef.current = Date.now();
+            // Este "pong" é o auto-response do Worker: responde na borda, sem esperar
+            // atrás de vídeo/controle na fila do Durable Object. É por isso que o ping
+            // exibido usa este round-trip em vez do "pong" via JSON (que reflete
+            // congestionamento do relay, não a rede em si).
+            if (lastPingSentAtRef.current > 0)
+              setLatency(Math.max(0, Date.now() - lastPingSentAtRef.current));
             return;
           }
           if (event.data.startsWith(TEXT_MEDIA_PREFIX)) {
@@ -616,8 +624,9 @@ function App() {
             } else if (m.type === 'viewer-count') {
               setViewers(m.count);
             } else if (m.type === 'pong') {
+              // Mantido por compatibilidade; não é mais a fonte da latência exibida
+              // (veja o "pong" de texto puro em onmessage, que é o RTT sem viés de fila).
               lastPongRef.current = Date.now();
-              setLatency(Math.max(0, Date.now() - m.sentAt));
             } else if (m.type === 'stream-config') {
               configRef.current = m;
               setConfig(m);
@@ -643,7 +652,15 @@ function App() {
               el.style.height = `${h * 100}%`;
               el.style.transform = `translate(-${(m.hx ?? 0.05) * 100}%,-${(m.hy ?? 0.05) * 100}%)`;
               if (remoteCursorTimerRef.current) window.clearTimeout(remoteCursorTimerRef.current);
-              if (m.visible && immersiveRef.current) {
+              // Antes, esse temporizador de segurança só era armado em modo imersivo
+              // (tela cheia do próprio app). Fora dele, o cursor dependia inteiramente de
+              // chegar um pacote "visible:false" do Capture — se o transmissor está
+              // exibindo algo em tela cheia (jogo, vídeo) e esse pacote final se perde
+              // (rede instável, canal de controle saturado), o cursor fica congelado na
+              // tela de quem assiste indefinidamente. Rearmar sempre, independente do
+              // modo de exibição, garante que o cursor some no máximo 1.6s depois do
+              // último movimento reportado, com ou sem esse pacote.
+              if (m.visible) {
                 remoteCursorTimerRef.current = window.setTimeout(() => {
                   if (cursorRef.current) cursorRef.current.style.display = 'none';
                 }, 1600);
@@ -694,7 +711,6 @@ function App() {
 
     connect();
 
-    let heartbeatTick = 0;
     const heartbeat = window.setInterval(() => {
       const ws = wsRef.current;
       if (ws?.readyState !== WebSocket.OPEN) return;
@@ -703,10 +719,10 @@ function App() {
         try { ws.close(4000, 'heartbeat-timeout'); } catch { }
         return;
       }
-      // Auto-response do Durable Object: mantém o socket vivo sem acordar a sala em ociosidade.
+      // Auto-response do Durable Object: mantém o socket vivo sem acordar a sala em
+      // ociosidade, e o round-trip também alimenta a latência exibida (onmessage 'pong').
+      lastPingSentAtRef.current = now;
       ws.send('ping');
-      if ((++heartbeatTick % 3) === 0 && configRef.current)
-        ws.send(JSON.stringify({ type: 'ping', sentAt: now }));
     }, 6000);
 
     const visibility = () => {
