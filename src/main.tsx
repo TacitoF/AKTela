@@ -221,6 +221,7 @@ function App() {
   const [latency, setLatency] = React.useState(0);
   const [error, setError] = React.useState('');
   const [config, setConfig] = React.useState<StreamConfig | null>(null);
+  const [frameSize, setFrameSize] = React.useState<{ width: number; height: number } | null>(null);
   const [copied, setCopied] = React.useState(false);
   const [fit, setFit] = React.useState<'contain' | 'cover'>('contain');
   const [immersive, setImmersive] = React.useState(false);
@@ -341,11 +342,18 @@ function App() {
           }
           const canvas = canvasRef.current;
           if (canvas) {
-            if (canvas.width !== cfg.width || canvas.height !== cfg.height) {
-              canvas.width = cfg.width;
-              canvas.height = cfg.height;
+            // A configuração negocia o codec, mas a área visível entregue por alguns
+            // drivers pode ser diferente. O frame real é a fonte da proporção exibida.
+            const frameWidth = Math.max(1, Number(frame.displayWidth || frame.codedWidth || cfg.width));
+            const frameHeight = Math.max(1, Number(frame.displayHeight || frame.codedHeight || cfg.height));
+            if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+              canvas.width = frameWidth;
+              canvas.height = frameHeight;
               canvasCtxRef.current = null;
             }
+            setFrameSize(current => current?.width === frameWidth && current?.height === frameHeight
+              ? current
+              : { width: frameWidth, height: frameHeight });
             const ctx = canvasCtxRef.current ?? canvas.getContext('2d', { alpha: false, desynchronized: true });
             canvasCtxRef.current = ctx;
             ctx?.drawImage(frame, 0, 0, canvas.width, canvas.height);
@@ -618,6 +626,7 @@ function App() {
                 if (cursorRef.current) cursorRef.current.style.display = 'none';
                 configRef.current = null;
                 setConfig(null);
+                setFrameSize(null);
                 setVideoPackets(0);
                 try { audioDecoder.current?.close?.(); } catch { }
                 audioDecoder.current = null;
@@ -634,6 +643,8 @@ function App() {
             } else if (m.type === 'stream-config') {
               configRef.current = m;
               setConfig(m);
+              setFrameSize({ width: m.width, height: m.height });
+              setFit('contain');
               lastVideoPacketAtRef.current = Date.now();
               lastDecodedFrameAtRef.current = Date.now();
               setHasVideo(false);
@@ -697,6 +708,7 @@ function App() {
         setHasVideo(false);
         configRef.current = null;
         setConfig(null);
+        setFrameSize(null);
         setVideoPackets(0);
         resetTimeline();
         closeVideoDecoder();
@@ -871,8 +883,8 @@ function App() {
     const update = () => {
       const rect = player.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
-      const sourceW = Math.max(1, config?.width ?? 16);
-      const sourceH = Math.max(1, config?.height ?? 9);
+      const sourceW = Math.max(1, frameSize?.width ?? config?.width ?? 16);
+      const sourceH = Math.max(1, frameSize?.height ?? config?.height ?? 9);
       const aspect = sourceW / sourceH;
       const containerAspect = rect.width / rect.height;
       let width: number;
@@ -896,8 +908,8 @@ function App() {
         }
       }
 
-      plane.style.width = `${Math.max(1, Math.floor(width))}px`;
-      plane.style.height = `${Math.max(1, Math.floor(height))}px`;
+      plane.style.width = `${Math.max(1, Math.min(Math.floor(width), Math.floor(rect.width)))}px`;
+      plane.style.height = `${Math.max(1, Math.min(Math.floor(height), Math.floor(rect.height)))}px`;
     };
 
     update();
@@ -908,7 +920,7 @@ function App() {
       observer.disconnect();
       window.removeEventListener('resize', update);
     };
-  }, [config?.width, config?.height, fit, immersive]);
+  }, [config?.width, config?.height, frameSize?.width, frameSize?.height, fit, immersive]);
 
   const codecError = error.toLowerCase().includes('codec') || error.toLowerCase().includes('decod');
   const status = !discordReady
@@ -957,7 +969,7 @@ function App() {
             <input className="volume" type="range" min="0" max="100" value={muted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio(); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/>
             <span className="volume-value">{muted ? 0 : volume}%</span>
           </>}</div>
-          <div className="control-right"><button className="text-button" onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Ajustar' : 'Preencher'}</span></button><button className="icon-button" onClick={enterImmersive}><Icon name="fullscreen"/></button></div>
+          <div className="control-right"><button className={`text-button fit-button ${fit === 'contain' ? 'safe' : 'cropped'}`} title={fit === 'contain' ? 'A tela inteira está visível; barras podem aparecer para preservar a proporção.' : 'Preenche o painel e pode recortar as bordas.'} onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Tela inteira' : 'Preencher (recorta)'}</span></button><button className="icon-button" onClick={enterImmersive}><Icon name="fullscreen"/></button></div>
         </div>
       </>}
 

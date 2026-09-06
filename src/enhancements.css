@@ -1,6 +1,20 @@
 .player-controls {
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
+.video-plane {
+  max-width: 100%;
+  max-height: 100%;
+  box-shadow: 0 0 0 1px #ffffff12;
+}
+.frame { object-fit: contain; }
+.fit-button.safe {
+  border-color: #3a6659;
+  color: #b8f4df;
+}
+.fit-button.cropped {
+  border-color: #785b2f;
+  color: #ffd98e;
+}
 .empty-state.recovering .empty-icon {
   color: #f2bc57;
   border-color: #6a5428;
