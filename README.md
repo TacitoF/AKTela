@@ -1,6 +1,11 @@
-# AKTela Activity 2.3.3
+# AKTela Activity 2.4.0
 
 Cliente de visualização executado como Discord Activity.
+
+- Descobre e exibe até três transmissões simultâneas na mesma Activity.
+- Mostra as telas em grade e permite destacar uma delas; no destaque, as outras assinaturas são encerradas para economizar banda e CPU.
+- Na grade, todas as telas começam sem áudio para evitar reprodução duplicada; a tela destacada inicia com áudio.
+- Com três transmissões, a primeira ocupa a faixa superior e as demais ficam lado a lado abaixo, adaptando-se a telas menores.
 
 - O player tenta liberar o áudio automaticamente e mostra o estado realmente mutado quando o Discord exige um clique para iniciar a reprodução.
 - O primeiro clique no volume libera o áudio sem inverter o controle de volta para mudo.
