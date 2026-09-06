@@ -10,7 +10,10 @@ const DIRECT_RELAY = `wss://${RELAY_TARGET}/ws`;
 const PROXIED_RELAY = `wss://${CLIENT_ID}.discordsays.com/relay/ws`;
 const TEXT_MEDIA_PREFIX = '@media:';
 const PROTOCOL_MAGIC = [65, 75, 86, 53]; // AKV5
+const BATCH_MAGIC = [65, 75, 66, 49]; // AKB1
 const HEADER = 24;
+const BATCH_HEADER = 8;
+const MAX_BATCH_PACKETS = 32;
 
 if (location.hostname.endsWith('discordsays.com')) {
   patchUrlMappings([{ prefix: '/relay', target: RELAY_TARGET }]);
@@ -56,7 +59,7 @@ type RelayControl =
   | { type: 'cursor'; x: number; y: number; visible: boolean; w?: number; h?: number; hx?: number; hy?: number }
   | StreamConfig;
 
-type StreamSummary = { id: string; slot: number; label: string };
+type StreamSummary = { id: string; slot: number; label: string; publisherName?: string };
 
 const MODE_SPECS: Record<ModeKey, { width: number; height: number; fps: number; level: string }> = {
   '720p30': { width: 1280, height: 720, fps: 30, level: '1F' },
@@ -180,7 +183,7 @@ function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'collapse' | 
   return <svg {...p}><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>;
 }
 
-function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }: { room: string; streamId: string; embedded?: boolean; initialMuted?: boolean }) {
+function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, allowImmersive = true, onFocus }: { room: string; streamId: string; embedded?: boolean; initialMuted?: boolean; allowImmersive?: boolean; onFocus?: () => void }) {
   const viewerIdRef = React.useRef(typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const playerRef = React.useRef<HTMLDivElement>(null);
   const videoPlaneRef = React.useRef<HTMLDivElement>(null);
@@ -218,6 +221,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
   const lastStallRecoveryAtRef = React.useRef(0);
   const remoteCursorTimerRef = React.useRef<number | null>(null);
   const remoteCursorVisibleRef = React.useRef(false);
+  const mediaChainRef = React.useRef<Promise<void>>(Promise.resolve());
   const liveRef = React.useRef(false);
   const relayConnectedRef = React.useRef(false);
   const immersiveRef = React.useRef(false);
@@ -579,6 +583,35 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
     }
   }, [closeVideoDecoder, configureVideo, ensureTimeline, requestKeyframe]);
 
+  const processMediaMessage = React.useCallback(async (ab: ArrayBuffer) => {
+    const bytes = new Uint8Array(ab);
+    const isBatch = bytes.byteLength >= BATCH_HEADER && BATCH_MAGIC.every((value, index) => bytes[index] === value);
+    if (!isBatch) {
+      await processMediaPacket(ab);
+      return;
+    }
+
+    const view = new DataView(ab);
+    const count = view.getUint16(6, true);
+    if (bytes[4] !== 1 || count < 1 || count > MAX_BATCH_PACKETS) throw new Error('Lote de mídia inválido.');
+    let offset = BATCH_HEADER;
+    for (let i = 0; i < count; i++) {
+      if (offset + 4 > bytes.byteLength) throw new Error('Lote de mídia incompleto.');
+      const length = view.getInt32(offset, true);
+      offset += 4;
+      if (length < HEADER || offset + length > bytes.byteLength) throw new Error('Pacote inválido dentro do lote.');
+      await processMediaPacket(ab.slice(offset, offset + length));
+      offset += length;
+    }
+    if (offset !== bytes.byteLength) throw new Error('Dados extras no lote de mídia.');
+  }, [processMediaPacket]);
+
+  const enqueueMediaMessage = React.useCallback((ab: ArrayBuffer) => {
+    mediaChainRef.current = mediaChainRef.current
+      .then(() => processMediaMessage(ab))
+      .catch((e: any) => setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`));
+  }, [processMediaMessage]);
+
   React.useEffect(() => {
     if (embedded) {
       setDiscordReady(true);
@@ -642,7 +675,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
             return;
           }
           if (event.data.startsWith(TEXT_MEDIA_PREFIX)) {
-            try { void processMediaPacket(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length))); }
+            try { enqueueMediaMessage(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length))); }
             catch (e: any) { setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`); }
             return;
           }
@@ -722,9 +755,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
         }
 
         if (event.data instanceof ArrayBuffer) {
-          void processMediaPacket(event.data);
+          enqueueMediaMessage(event.data);
         } else if (event.data instanceof Blob) {
-          void event.data.arrayBuffer().then(ab => processMediaPacket(ab)).catch(() => setError('Falha ao ler pacote binário do relay.'));
+          void event.data.arrayBuffer().then(enqueueMediaMessage).catch(() => setError('Falha ao ler pacote binário do relay.'));
         }
       };
 
@@ -788,7 +821,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
       try { audioDecoder.current?.close?.(); } catch { }
       try { audioContext.current?.close(); } catch { }
     };
-  }, [closeVideoDecoder, configureAudio, initialMuted, processMediaPacket, requestKeyframe, resetTimeline, room, streamId]);
+  }, [closeVideoDecoder, configureAudio, enqueueMediaMessage, initialMuted, requestKeyframe, resetTimeline, room, streamId]);
 
   React.useEffect(() => {
     let healthTick = 0;
@@ -992,7 +1025,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
       <button className={`connection ${relayConnected ? 'ok' : ''}`} onClick={() => setDiagnosticsOpen(true)} title="Abrir diagnóstico"><span className="dot"/><span>{status}</span></button>
     </header>
 
-    <div ref={playerRef} className={`player ${immersive && hud ? 'hud-visible' : ''}`} onDoubleClick={toggleImmersive} onPointerMove={showHud}>
+    <div ref={playerRef} className={`player ${immersive && hud ? 'hud-visible' : ''}`} onDoubleClick={allowImmersive ? toggleImmersive : onFocus} onPointerMove={showHud}>
       <div className="surface">
         <div ref={videoPlaneRef} className="video-plane">
           <canvas ref={canvasRef} className={hasVideo ? 'frame visible' : 'frame'} width={config?.width ?? 1280} height={config?.height ?? 720}/>
@@ -1011,7 +1044,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false }
             <input className="volume" type="range" min="0" max="100" value={audioMuted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio().catch(() => setAudioReady(false)); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/>
             <span className="volume-value">{audioMuted ? 0 : volume}%</span>
           </>}</div>
-          <div className="control-right"><button className={`text-button fit-button ${fit === 'contain' ? 'safe' : 'cropped'}`} aria-pressed={fit === 'contain'} title={fit === 'contain' ? 'Imagem completa, sem cortes. Clique para preencher o painel.' : 'O painel está preenchido e as bordas podem ser cortadas. Clique para ajustar a imagem.'} onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Ajustar à tela' : 'Preencher painel'}</span></button><button className="text-button expand-player" onClick={enterImmersive} title="Expandir somente o player do AKTela"><Icon name="fullscreen"/><span>Expandir player</span></button></div>
+          <div className="control-right"><button className={`text-button fit-button ${fit === 'contain' ? 'safe' : 'cropped'}`} aria-pressed={fit === 'contain'} title={fit === 'contain' ? 'Imagem completa, sem cortes. Clique para preencher o painel.' : 'O painel está preenchido e as bordas podem ser cortadas. Clique para ajustar a imagem.'} onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Ajustar à tela' : 'Preencher painel'}</span></button>{allowImmersive ? <button className="text-button expand-player" onClick={enterImmersive} title="Expandir somente o player do AKTela"><Icon name="fullscreen"/><span>Expandir player</span></button> : onFocus && <button className="text-button focus-player" onClick={onFocus} title="Destacar esta transmissão"><Icon name="focus"/><span>Destacar tela</span></button>}</div>
         </div>
       </>}
 
@@ -1152,11 +1185,10 @@ function MultiApp() {
 
     <div className={`stream-grid count-${visibleStreams.length} ${focusedStream ? 'focused' : ''}`}>
       {visibleStreams.map(stream => <article className="stream-card" key={`${stream.id}-${focusedStream ? 'focus' : 'grid'}`}>
-        <header className="stream-card-header"><strong>{stream.label}</strong>{focusedStream
-          ? <button className="back-grid" onClick={() => setFocusedStream(null)} title="Voltar para todas as transmissões"><Icon name="grid"/><span>Voltar à grade</span></button>
-          : streams.length > 1 && <button className="focus-stream" onClick={() => setFocusedStream(stream.id)} title={`Exibir somente ${stream.label}`}><Icon name="focus"/><span>Destacar tela</span></button>}
+        <header className="stream-card-header"><div className="stream-identity"><strong>{stream.publisherName || 'Transmissor'}</strong><span>{stream.label}</span></div>{focusedStream &&
+          <button className="back-grid" onClick={() => setFocusedStream(null)} title="Voltar para todas as transmissões"><Icon name="grid"/><span>Voltar à grade</span></button>}
         </header>
-        <div className="stream-card-player"><StreamPlayer room={room} streamId={stream.id} embedded initialMuted={!focusedStream}/></div>
+        <div className="stream-card-player"><StreamPlayer room={room} streamId={stream.id} embedded initialMuted={!focusedStream} allowImmersive={streams.length === 1} onFocus={!focusedStream && streams.length > 1 ? () => setFocusedStream(stream.id) : undefined}/></div>
       </article>)}
       {visibleStreams.length === 0 && <div className="multi-empty"><div className="empty-icon"><Icon name="monitor"/></div><h2>Aguardando transmissão</h2><p>Abra o AKTela Capture, cole o código abaixo e inicie o compartilhamento.</p></div>}
     </div>

@@ -56,8 +56,11 @@
 .stream-card { min-width: 0; min-height: 0; display: grid; grid-template-rows: 36px minmax(0, 1fr); overflow: hidden; border: 1px solid #292e39; border-radius: 12px; background: #0d1016; }
 .stream-card-header { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; background: #181b23; border-bottom: 1px solid #292e39; }
 .stream-card-header strong { font-size: 12px; }
+.stream-identity { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.stream-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stream-identity span { color: #8f98a8; font-size: 10px; white-space: nowrap; }
 .stream-card-header button { width: auto; height: 28px; padding: 0 9px; display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; }
-.stream-card-header .focus-stream { border-color: #5964be; background: #252a51; color: #dfe2ff; }
+.focus-player { border-color: #5964be; background: #252a51; color: #dfe2ff; }
 .stream-card-header button svg { width: 15px; height: 15px; }
 .stream-card-player { min-height: 0; position: relative; }
 .embedded-page { height: 100%; padding: 0; }
@@ -89,7 +92,7 @@
   .stream-grid.count-3 .stream-card:first-child { grid-column: auto; }
   .stream-card { grid-template-rows: 30px minmax(0, 1fr); }
   .stream-card-header button { height: 24px; padding: 0 7px; }
-  .embedded-player .fit-button span, .embedded-player .expand-player span { display: none; }
+  .embedded-player .fit-button span, .embedded-player .expand-player span, .embedded-player .focus-player span { display: none; }
   .multi-bottom { justify-content: center; padding: 0 7px; }
 }
 
@@ -97,6 +100,7 @@
 .shell.immersive { animation: immersive-enter .2s ease-out; }
 .immersive-exit { width: auto; height: 40px; padding: 0 13px; display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 750; opacity: .82; background: #20242ded; box-shadow: 0 8px 28px #0008; transition: opacity .15s, background .15s, transform .15s; }
 .immersive-exit:hover, .hud-visible .immersive-exit { opacity: 1; background: #2a303c; transform: translateY(-1px); }
+.immersive-volume-details { width: 170px; padding-right: 10px; }
 .immersive-hint { position: absolute; top: 18px; left: 50%; z-index: 10; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 9px 14px; border: 1px solid #353c49; border-radius: 10px; background: #12151bed; box-shadow: 0 8px 30px #0009; pointer-events: none; animation: immersive-guide 4s ease forwards; }
 .immersive-hint strong { font-size: 12px; }
 .immersive-hint span { color: #aeb6c5; font-size: 10px; white-space: nowrap; }
