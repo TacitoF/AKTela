@@ -15,6 +15,10 @@
   border-color: #785b2f;
   color: #ffd98e;
 }
+.awaiting-audio {
+  border-color: #785b2f;
+  color: #ffd98e;
+}
 .empty-state.recovering .empty-icon {
   color: #f2bc57;
   border-color: #6a5428;

@@ -404,6 +404,7 @@ function App() {
     let ac = audioContext.current;
     if (!ac) {
       ac = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+      ac.onstatechange = () => setAudioReady(ac?.state === 'running');
       audioContext.current = ac;
     }
     let gain = gainNode.current;
@@ -416,6 +417,21 @@ function App() {
     await ac.resume();
     setAudioReady(ac.state === 'running');
   }, [muted, volume]);
+
+  const toggleAudio = React.useCallback(async () => {
+    // O primeiro clique precisa liberar o AudioContext no Discord/Chromium. Ele não
+    // deve também inverter o estado para mudo, como acontecia anteriormente.
+    if (!audioReady) {
+      try {
+        await ensureAudio();
+        if (audioContext.current?.state === 'running') setMuted(false);
+      } catch {
+        setAudioReady(false);
+      }
+      return;
+    }
+    setMuted(value => !value);
+  }, [audioReady, ensureAudio]);
 
   const configureAudio = React.useCallback((cfg: StreamConfig) => {
     try { audioDecoder.current?.close?.(); } catch { }
@@ -822,6 +838,13 @@ function App() {
   }, [volume, muted]);
 
   React.useEffect(() => {
+    if (!config?.audioEnabled || muted || audioReady) return;
+    // Tenta iniciar automaticamente quando a política do cliente permite. Quando o
+    // Chromium exige interação, a interface permanece visualmente mutada até o clique.
+    void ensureAudio().catch(() => setAudioReady(false));
+  }, [audioReady, config?.audioEnabled, ensureAudio, muted]);
+
+  React.useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'd') {
         e.preventDefault();
@@ -943,6 +966,7 @@ function App() {
 
   const health = !relayConnected ? 'Offline' : latency === 0 ? 'Conectando' : latency < 120 ? 'Excelente' : latency < 260 ? 'Boa' : latency < 450 ? 'Alta latência' : 'Instável';
   const quality = config ? `${config.height >= 1080 ? '1080p' : '720p'} · ${config.fps} FPS` : '—';
+  const audioMuted = muted || !audioReady;
 
   return <main className="page"><section className={`shell ${immersive ? 'immersive' : ''}`}>
     <header className="topbar">
@@ -965,9 +989,9 @@ function App() {
         <div className="stream-meta"><span>{quality}</span>{config?.audioEnabled && <span>Áudio</span>}<span>{latency ? `${latency} ms` : '— ms'}</span></div>
         <div className="player-controls">
           <div className="control-left">{config?.audioEnabled && <>
-            <button className="icon-button" onClick={async () => { if (!audioReady) await ensureAudio(); setMuted(v => !v); }}><Icon name={muted ? 'mute' : 'volume'}/></button>
-            <input className="volume" type="range" min="0" max="100" value={muted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio(); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/>
-            <span className="volume-value">{muted ? 0 : volume}%</span>
+            <button className={`icon-button ${!audioReady ? 'awaiting-audio' : ''}`} onClick={toggleAudio} title={audioReady ? (muted ? 'Ativar áudio' : 'Silenciar') : 'Clique para ativar o áudio'} aria-label={audioReady ? (muted ? 'Ativar áudio' : 'Silenciar') : 'Ativar áudio'}><Icon name={audioMuted ? 'mute' : 'volume'}/></button>
+            <input className="volume" type="range" min="0" max="100" value={audioMuted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio().catch(() => setAudioReady(false)); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/>
+            <span className="volume-value">{audioMuted ? 0 : volume}%</span>
           </>}</div>
           <div className="control-right"><button className={`text-button fit-button ${fit === 'contain' ? 'safe' : 'cropped'}`} title={fit === 'contain' ? 'A tela inteira está visível; barras podem aparecer para preservar a proporção.' : 'Preenche o painel e pode recortar as bordas.'} onClick={() => setFit(v => v === 'contain' ? 'cover' : 'contain')}><Icon name="fit"/><span>{fit === 'contain' ? 'Tela inteira' : 'Preencher (recorta)'}</span></button><button className="icon-button" onClick={enterImmersive}><Icon name="fullscreen"/></button></div>
         </div>
@@ -975,7 +999,7 @@ function App() {
 
       {immersive && <>
         <button className="immersive-exit" onClick={() => setImmersive(false)} aria-label="Sair da tela cheia"><Icon name="fullscreen"/></button>
-        {config?.audioEnabled && <div className="immersive-volume"><button className="immersive-audio-button" onClick={async () => { if (!audioReady) await ensureAudio(); setMuted(v => !v); }}><Icon name={muted ? 'mute' : 'volume'}/></button><div className="immersive-volume-details"><input className="volume" type="range" min="0" max="100" value={muted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio(); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/><span>{muted ? 0 : volume}%</span></div></div>}
+        {config?.audioEnabled && <div className="immersive-volume"><button className={`immersive-audio-button ${!audioReady ? 'awaiting-audio' : ''}`} onClick={toggleAudio} title={audioReady ? (muted ? 'Ativar áudio' : 'Silenciar') : 'Clique para ativar o áudio'} aria-label={audioReady ? (muted ? 'Ativar áudio' : 'Silenciar') : 'Ativar áudio'}><Icon name={audioMuted ? 'mute' : 'volume'}/></button><div className="immersive-volume-details"><input className="volume" type="range" min="0" max="100" value={audioMuted ? 0 : volume} onPointerDown={() => { if (!audioReady) void ensureAudio().catch(() => setAudioReady(false)); }} onChange={e => { setMuted(false); setVolume(Number(e.target.value)); }}/><span>{audioMuted ? 0 : volume}%</span></div></div>}
       </>}
     </div>
 
