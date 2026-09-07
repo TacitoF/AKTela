@@ -200,6 +200,8 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const mediaBaseUs = React.useRef<number | null>(null);
   const perfBaseMs = React.useRef(0);
   const audioBaseSec = React.useRef(0);
+  const audioNextSec = React.useRef(0);
+  const scheduledAudioSources = React.useRef<Set<AudioBufferSourceNode>>(new Set());
   const waitForKeyframe = React.useRef(true);
   const configRef = React.useRef<StreamConfig | null>(null);
   const videoCodecRef = React.useRef('');
@@ -253,12 +255,25 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false);
   const [diagnostics, setDiagnostics] = React.useState({ packetsPerSec: 0, decodedFps: 0, decodeQueue: 0, codec: '—', reconnects: 0, keyframes: 0, dropped: 0, resets: 0, stalled: false });
 
+  const clearScheduledAudio = React.useCallback(() => {
+    for (const source of scheduledAudioSources.current) {
+      try {
+        source.onended = null;
+        source.stop();
+        source.disconnect();
+      } catch { }
+    }
+    scheduledAudioSources.current.clear();
+    audioNextSec.current = 0;
+  }, []);
+
   const resetTimeline = React.useCallback(() => {
+    clearScheduledAudio();
     mediaBaseUs.current = null;
     perfBaseMs.current = 0;
     audioBaseSec.current = 0;
     waitForKeyframe.current = true;
-  }, []);
+  }, [clearScheduledAudio]);
 
   const ensureTimeline = React.useCallback((ts: number) => {
     if (mediaBaseUs.current !== null) return;
@@ -448,6 +463,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   }, [audioReady, ensureAudio]);
 
   const configureAudio = React.useCallback((cfg: StreamConfig) => {
+    clearScheduledAudio();
     try { audioDecoder.current?.close?.(); } catch { }
     audioDecoder.current = null;
     if (!cfg.audioEnabled) return;
@@ -468,16 +484,34 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
           catch { data.close(); return; }
           buffer.copyToChannel(channel, ch);
         }
+
+        const now = ac.currentTime;
+        const timelineWhen = audioBaseSec.current + (ts - (mediaBaseUs.current ?? ts)) / 1_000_000;
+        const durationSec = Math.max(0.005, data.numberOfFrames / data.sampleRate);
+
+        // Áudio antigo não deve atrasar o vídeo. Uma pequena tolerância absorve jitter;
+        // além dela, descartamos o bloco em vez de comprimir vários blocos no mesmo
+        // instante, que era percebido como áudio metálico/serrilhado.
+        if (now - timelineWhen > 0.040) { data.close(); return; }
+
+        let when = Math.max(timelineWhen, audioNextSec.current, now + 0.008);
+        if (when - now > 0.080) {
+          // Se a fila local cresceu demais, mantenha o áudio mais recente e recomece
+          // com uma margem curta. Isso preserva a sincronia visual e a prioridade do vídeo.
+          clearScheduledAudio();
+          when = now + 0.035;
+        }
+
         const source = ac.createBufferSource();
         source.buffer = buffer;
         source.connect(gain);
-        let when = audioBaseSec.current + (ts - (mediaBaseUs.current ?? ts)) / 1_000_000;
-        if (when < ac.currentTime + 0.006) when = ac.currentTime + 0.006;
-        if (when > ac.currentTime + 0.14) {
-          audioBaseSec.current -= when - (ac.currentTime + 0.035);
-          when = ac.currentTime + 0.035;
-        }
+        source.onended = () => {
+          scheduledAudioSources.current.delete(source);
+          try { source.disconnect(); } catch { }
+        };
+        scheduledAudioSources.current.add(source);
         source.start(when);
+        audioNextSec.current = when + durationSec;
         data.close();
       },
       error: () => { }
@@ -487,7 +521,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       decoder.configure({ codec: 'opus', sampleRate: cfg.audioSampleRate, numberOfChannels: cfg.audioChannels });
       audioDecoder.current = decoder;
     } catch { }
-  }, [ensureTimeline]);
+  }, [clearScheduledAudio, ensureTimeline]);
 
   const processMediaPacket = React.useCallback(async (ab: ArrayBuffer) => {
     try {
@@ -569,7 +603,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       }
 
       if (kind === 2 && audioDecoder.current?.state === 'configured') {
-        if (audioDecoder.current.decodeQueueSize > 8) return;
+        if (audioDecoder.current.decodeQueueSize > 6) return;
         const C = (window as any).EncodedAudioChunk;
         if (!C) return;
         audioDecoder.current.decode(new C({ type: 'key', timestamp: ts, duration, data: payload }));
@@ -818,10 +852,11 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       if (remoteCursorTimerRef.current) window.clearTimeout(remoteCursorTimerRef.current);
       try { wsRef.current?.close(); } catch { }
       closeVideoDecoder();
+      clearScheduledAudio();
       try { audioDecoder.current?.close?.(); } catch { }
       try { audioContext.current?.close(); } catch { }
     };
-  }, [closeVideoDecoder, configureAudio, enqueueMediaMessage, initialMuted, requestKeyframe, resetTimeline, room, streamId]);
+  }, [clearScheduledAudio, closeVideoDecoder, configureAudio, enqueueMediaMessage, initialMuted, requestKeyframe, resetTimeline, room, streamId]);
 
   React.useEffect(() => {
     let healthTick = 0;
