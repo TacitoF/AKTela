@@ -67,8 +67,8 @@
 .embedded-player { border: 0; border-radius: 0; grid-template-rows: minmax(0, 1fr); }
 .embedded-player > .topbar, .embedded-player > .bottom { display: none; }
 .embedded-player > .error { bottom: 0; }
-.stream-grid:not(.focused) .embedded-player .volume,
-.stream-grid:not(.focused) .embedded-player .volume-value,
+.stream-grid:not(.focused) .embedded-player .player-controls .volume,
+.stream-grid:not(.focused) .embedded-player .player-controls .volume-value,
 .stream-grid:not(.focused) .embedded-player .stream-meta { display: none; }
 .stream-grid:not(.focused) .embedded-player .player-controls { height: 44px; bottom: 8px; left: 8px; right: 8px; }
 .multi-empty { display: grid; place-content: center; text-align: center; color: #f6f7fb; }

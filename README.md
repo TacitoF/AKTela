@@ -1,4 +1,4 @@
-# AKTela Activity 2.5.1
+# AKTela Activity 2.5.2
 
 Cliente de visualização executado como Discord Activity.
 
@@ -10,6 +10,7 @@ Cliente de visualização executado como Discord Activity.
 - Quando há várias telas, substitui a expansão das miniaturas por “Destacar tela”, mantendo somente o player escolhido ativo e com áudio.
 - Aceita lotes de mídia AKB1 para reduzir o consumo de requisições do Durable Object sem perder compatibilidade com pacotes AKV5 individuais.
 - O controle de volume permanece visível no player expandido de sessões com uma única tela.
+- O slider de volume também permanece visível e interativo ao expandir uma transmissão diretamente da grade.
 - Agenda os blocos de áudio em sequência e limita a fila local a 80 ms, evitando sobreposição e som serrilhado.
 - Descarta áudio atrasado em vez de acumular atraso sobre o vídeo.
 
