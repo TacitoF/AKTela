@@ -1,4 +1,4 @@
-# AKTela Activity 2.5.2
+# AKTela Activity 2.6.0
 
 Cliente de visualização executado como Discord Activity.
 
@@ -11,8 +11,11 @@ Cliente de visualização executado como Discord Activity.
 - Aceita lotes de mídia AKB1 para reduzir o consumo de requisições do Durable Object sem perder compatibilidade com pacotes AKV5 individuais.
 - O controle de volume permanece visível no player expandido de sessões com uma única tela.
 - O slider de volume também permanece visível e interativo ao expandir uma transmissão diretamente da grade.
-- Agenda os blocos de áudio em sequência e limita a fila local a 80 ms, evitando sobreposição e som serrilhado.
-- Descarta áudio atrasado em vez de acumular atraso sobre o vídeo.
+- Reproduz o PCM decodificado em um `AudioWorklet` contínuo, isolado da thread da interface.
+- Mantém uma reserva curta de 40 ms, suaviza microfaltas com fade e limita a fila a 140 ms.
+- Usa a mesma origem temporal para áudio e vídeo e descarta somente áudio realmente antigo.
+- Mantém o agendamento sequencial como fallback para navegadores sem `AudioWorklet`.
+- Exibe buffer e microfaltas de áudio no painel de diagnóstico.
 
 - O player tenta liberar o áudio automaticamente e mostra o estado realmente mutado quando o Discord exige um clique para iniciar a reprodução.
 - O primeiro clique no volume libera o áudio sem inverter o controle de volta para mudo.
