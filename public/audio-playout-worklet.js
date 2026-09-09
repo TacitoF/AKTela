@@ -1,5 +1,7 @@
-const DEFAULT_TARGET_MS = 40;
-const DEFAULT_MAX_MS = 140;
+// Três blocos Opus de 20 ms deixam margem sobre os lotes de rede de 30 ms sem
+// adicionar atraso visual perceptível. Áudio e vídeo continuam na mesma timeline.
+const DEFAULT_TARGET_MS = 60;
+const DEFAULT_MAX_MS = 160;
 const FADE_MS = 5;
 
 class AKTelaAudioPlayoutProcessor extends AudioWorkletProcessor {

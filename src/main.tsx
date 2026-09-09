@@ -92,8 +92,12 @@ function roomCode(instanceId: string) {
 }
 
 function viewerRelayUrl(room: string, viewerId: string, streamId: string, receiveAudio: boolean) {
-  const base = location.hostname.endsWith('discordsays.com') ? PROXIED_RELAY : DIRECT_RELAY;
-  return `${base}?role=viewer&room=${encodeURIComponent(room)}&transport=text&viewerId=${encodeURIComponent(viewerId)}&streamId=${encodeURIComponent(streamId)}&audio=${receiveAudio ? '1' : '0'}`;
+  const proxied = location.hostname.endsWith('discordsays.com');
+  const base = proxied ? PROXIED_RELAY : DIRECT_RELAY;
+  // O proxy da Activity continua no transporte textual comprovadamente estável.
+  // Fora dele, binário evita Base64 e reduz banda/alocações em aproximadamente 25%.
+  const transport = proxied ? 'text' : 'binary';
+  return `${base}?role=viewer&room=${encodeURIComponent(room)}&transport=${transport}&viewerId=${encodeURIComponent(viewerId)}&streamId=${encodeURIComponent(streamId)}&audio=${receiveAudio ? '1' : '0'}`;
 }
 
 function observerRelayUrl(room: string, viewerId: string) {
@@ -235,6 +239,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const relayConnectedRef = React.useRef(false);
   const immersiveRef = React.useRef(false);
   const mutedRef = React.useRef(initialMuted);
+  const videoEnabledRef = React.useRef(document.visibilityState !== 'hidden');
 
   const [discordReady, setDiscordReady] = React.useState(embedded);
   const [relayConnected, setRelayConnected] = React.useState(false);
@@ -485,7 +490,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
           };
           node.connect(outputGain);
           const cfg = configRef.current;
-          node.port.postMessage({ type: 'configure', channels: cfg?.audioChannels ?? 2, targetMs: 40, maxMs: 140 });
+          node.port.postMessage({ type: 'configure', channels: cfg?.audioChannels ?? 2, targetMs: 60, maxMs: 160 });
           audioWorkletNode.current = node;
           clearScheduledAudio();
           return node;
@@ -631,14 +636,14 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     try {
       decoder.configure({ codec: 'opus', sampleRate: cfg.audioSampleRate, numberOfChannels: cfg.audioChannels });
       audioDecoder.current = decoder;
-      try { audioWorkletNode.current?.port.postMessage({ type: 'configure', channels: cfg.audioChannels, targetMs: 40, maxMs: 140 }); } catch { }
+      try { audioWorkletNode.current?.port.postMessage({ type: 'configure', channels: cfg.audioChannels, targetMs: 60, maxMs: 160 }); } catch { }
     } catch { }
   }, [clearScheduledAudio, ensureTimeline, resetAudioPlayout]);
 
-  const processMediaPacket = React.useCallback(async (ab: ArrayBuffer) => {
+  const processMediaPacket = React.useCallback(async (ab: ArrayBuffer, byteOffset = 0, byteLength = ab.byteLength - byteOffset) => {
     try {
-      if (ab.byteLength < HEADER) return;
-      const dv = new DataView(ab);
+      if (byteOffset < 0 || byteLength < HEADER || byteOffset + byteLength > ab.byteLength) return;
+      const dv = new DataView(ab, byteOffset, byteLength);
       for (let i = 0; i < PROTOCOL_MAGIC.length; i++) if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
 
       const kind = dv.getUint8(5);
@@ -649,9 +654,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       const ts = hi * 4294967296 + lo;
       const duration = dv.getInt32(16, true);
       const len = dv.getInt32(20, true);
-      if (len <= 0 || HEADER + len !== ab.byteLength || duration <= 0 || ts < 0) return;
+      if (len <= 0 || HEADER + len !== byteLength || duration <= 0 || ts < 0) return;
 
-      const payload = new Uint8Array(ab, HEADER, len);
+      const payload = new Uint8Array(ab, byteOffset + HEADER, len);
       ensureTimeline(ts);
 
       if (kind === 1) {
@@ -751,7 +756,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       const length = view.getInt32(offset, true);
       offset += 4;
       if (length < HEADER || offset + length > bytes.byteLength) throw new Error('Pacote inválido dentro do lote.');
-      await processMediaPacket(ab.slice(offset, offset + length));
+      await processMediaPacket(ab, offset, length);
       offset += length;
     }
     if (offset !== bytes.byteLength) throw new Error('Dados extras no lote de mídia.');
@@ -807,6 +812,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         setError('');
         if (capabilitiesRef.current) ws.send(JSON.stringify(capabilitiesRef.current));
         ws.send(JSON.stringify({ type: 'set-audio', enabled: !mutedRef.current }));
+        ws.send(JSON.stringify({ type: 'set-video', enabled: videoEnabledRef.current }));
         lastPingSentAtRef.current = Date.now();
         ws.send('ping');
         requestKeyframe('viewer-connected');
@@ -957,7 +963,16 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     }, 6000);
 
     const visibility = () => {
-      if (document.visibilityState === 'visible') requestKeyframe('viewer-visible');
+      const visible = document.visibilityState === 'visible';
+      videoEnabledRef.current = visible;
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'set-video', enabled: visible }));
+      if (visible) {
+        setHasVideo(false);
+        resetTimeline();
+        closeVideoDecoder();
+        requestKeyframe('viewer-visible');
+      }
     };
     document.addEventListener('visibilitychange', visibility);
 
@@ -997,7 +1012,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       decodedFrameRateBaseRef.current = decodedTotal;
       const packetAge = lastVideoPacketAtRef.current > 0 ? now - lastVideoPacketAtRef.current : Number.POSITIVE_INFINITY;
       const frameAge = lastDecodedFrameAtRef.current > 0 ? now - lastDecodedFrameAtRef.current : Number.POSITIVE_INFINITY;
-      const expectingVideo = relayConnectedRef.current && liveRef.current && configRef.current !== null;
+      const expectingVideo = videoEnabledRef.current && relayConnectedRef.current && liveRef.current && configRef.current !== null;
       const packetsStopped = expectingVideo && packetAge > 2600;
       const decoderStopped = expectingVideo && packetAge < 1300 && frameAge > 1900;
       const stalled = packetsStopped || decoderStopped;

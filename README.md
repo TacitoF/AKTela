@@ -1,8 +1,12 @@
-# AKTela Activity 2.6.0
+# AKTela Activity 2.7.0
 
 Cliente de visualização executado como Discord Activity.
 
 - Descobre e exibe até três transmissões simultâneas na mesma Activity.
+- Suspende os pacotes e a decodificação de vídeo quando a Activity fica oculta, retomando a partir de um quadro-chave ao voltar.
+- Fora do proxy do Discord, usa mídia binária para reduzir Base64, banda e alocações; dentro do Discord preserva o transporte textual estável.
+- Processa pacotes agrupados sem criar uma nova cópia de cada frame.
+- Envia a saúde real do player ao Capture para que a qualidade também reaja a sobrecarga no dispositivo de quem assiste.
 - Mostra as telas em grade e permite destacar uma delas; no destaque, as outras assinaturas são encerradas para economizar banda e CPU.
 - Na grade, todas as telas começam sem áudio para evitar reprodução duplicada; a tela destacada inicia com áudio.
 - Com três transmissões, a primeira ocupa a faixa superior e as demais ficam lado a lado abaixo, adaptando-se a telas menores.
@@ -12,7 +16,7 @@ Cliente de visualização executado como Discord Activity.
 - O controle de volume permanece visível no player expandido de sessões com uma única tela.
 - O slider de volume também permanece visível e interativo ao expandir uma transmissão diretamente da grade.
 - Reproduz o PCM decodificado em um `AudioWorklet` contínuo, isolado da thread da interface.
-- Mantém uma reserva curta de 40 ms, suaviza microfaltas com fade e limita a fila a 140 ms.
+- Mantém uma reserva curta de 60 ms, suaviza microfaltas com fade e limita a fila a 160 ms.
 - Usa a mesma origem temporal para áudio e vídeo e descarta somente áudio realmente antigo.
 - Mantém o agendamento sequencial como fallback para navegadores sem `AudioWorklet`.
 - Exibe buffer e microfaltas de áudio no painel de diagnóstico.
