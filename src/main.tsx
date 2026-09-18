@@ -3,6 +3,13 @@ import ReactDOM from 'react-dom/client';
 import { DiscordSDK, patchUrlMappings } from '@discord/embedded-app-sdk';
 import './style.css';
 import './enhancements.css';
+import {
+  DECODER_STALL_ESCALATION_WINDOW_MS,
+  VIDEO_PACKET_RECONNECT_MS,
+  classifyVideoStall,
+  decoderQueueLimits,
+  nextDecoderStallCount
+} from './media-policy';
 
 const CLIENT_ID = '1545406549105713182';
 const RELAY_TARGET = 'aktela-relay.tacito1-filho.workers.dev';
@@ -14,6 +21,8 @@ const BATCH_MAGIC = [65, 75, 66, 49]; // AKB1
 const HEADER = 24;
 const BATCH_HEADER = 8;
 const MAX_BATCH_PACKETS = 32;
+const MAX_PENDING_MEDIA_MESSAGES = 12;
+const MAX_PENDING_VIDEO_FRAMES = 8;
 
 if (location.hostname.endsWith('discordsays.com')) {
   patchUrlMappings([{ prefix: '/relay', target: RELAY_TARGET }]);
@@ -148,15 +157,25 @@ async function probeCapabilities(): Promise<ViewerCapabilities> {
       const supported: CapabilityToken[] = [];
       const tokens: CapabilityToken[] = ['h264-main', 'h264-baseline', 'h264-high', 'vp8'];
       for (const token of tokens) {
-        try {
-          const result = await VideoDecoderCtor.isConfigSupported({
-            codec: tokenCodec(mode, token),
-            codedWidth: spec.width,
-            codedHeight: spec.height,
-            optimizeForLatency: true
-          });
-          if (result?.supported) supported.push(token);
-        } catch { }
+        const base = {
+          codec: tokenCodec(mode, token),
+          codedWidth: spec.width,
+          codedHeight: spec.height,
+          optimizeForLatency: true
+        };
+        for (const candidate of [
+          { ...base, hardwareAcceleration: 'no-preference' },
+          { ...base, hardwareAcceleration: 'prefer-software' },
+          base
+        ]) {
+          try {
+            const result = await VideoDecoderCtor.isConfigSupported(candidate);
+            if (result?.supported) {
+              supported.push(token);
+              break;
+            }
+          } catch { }
+        }
       }
       modes[mode] = supported;
     }
@@ -227,14 +246,23 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const droppedCounterRef = React.useRef(0);
   const decoderResetsRef = React.useRef(0);
   const videoGenerationRef = React.useRef(0);
+  const decoderAccelerationRef = React.useRef<'no-preference' | 'prefer-software'>('no-preference');
+  const softwareDecoderCodecsRef = React.useRef<Set<string>>(new Set());
+  const decoderCongestedSinceRef = React.useRef(0);
+  const decoderStallCountRef = React.useRef(0);
+  const lastDecoderStallAtRef = React.useRef(0);
   const decodedFrameCounterRef = React.useRef(0);
   const decodedFrameRateBaseRef = React.useRef(0);
   const lastVideoPacketAtRef = React.useRef(0);
   const lastDecodedFrameAtRef = React.useRef(0);
   const lastStallRecoveryAtRef = React.useRef(0);
+  const lastForcedReconnectAtRef = React.useRef(0);
   const remoteCursorTimerRef = React.useRef<number | null>(null);
   const remoteCursorVisibleRef = React.useRef(false);
-  const mediaChainRef = React.useRef<Promise<void>>(Promise.resolve());
+  const mediaQueueRef = React.useRef<ArrayBuffer[]>([]);
+  const mediaProcessingRef = React.useRef(false);
+  const pendingVideoFramesRef = React.useRef<Array<{ frame: any; due: number; generation: number; cfg: StreamConfig }>>([]);
+  const renderRafRef = React.useRef<number | null>(null);
   const liveRef = React.useRef(false);
   const relayConnectedRef = React.useRef(false);
   const immersiveRef = React.useRef(false);
@@ -265,7 +293,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const [videoPackets, setVideoPackets] = React.useState(0);
   const [capabilitiesReady, setCapabilitiesReady] = React.useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false);
-  const [diagnostics, setDiagnostics] = React.useState({ packetsPerSec: 0, decodedFps: 0, decodeQueue: 0, codec: '—', reconnects: 0, keyframes: 0, dropped: 0, resets: 0, audioBufferMs: 0, audioUnderflows: 0, stalled: false });
+  const [diagnostics, setDiagnostics] = React.useState({ packetsPerSec: 0, decodedFps: 0, decodeQueue: 0, codec: '—', decoderMode: 'Automático', reconnects: 0, keyframes: 0, dropped: 0, resets: 0, audioBufferMs: 0, audioUnderflows: 0, stalled: false });
 
   const clearScheduledAudio = React.useCallback(() => {
     for (const source of scheduledAudioSources.current) {
@@ -299,13 +327,13 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     mediaBaseUs.current = ts;
     // A margem inicial cobre um lote de rede sem deixar o áudio visivelmente atrás
     // do vídeo. Ambos usam a mesma origem para preservar a sincronia A/V.
-    perfBaseMs.current = performance.now() + 60;
-    audioBaseSec.current = (audioContext.current?.currentTime ?? 0) + 0.060;
+    perfBaseMs.current = performance.now() + 80;
+    audioBaseSec.current = (audioContext.current?.currentTime ?? 0) + 0.080;
   }, []);
 
   const requestKeyframe = React.useCallback((reason: string) => {
     const now = Date.now();
-    if (now - lastKeyframeRequestRef.current < 700) return;
+    if (now - lastKeyframeRequestRef.current < 1800) return;
     lastKeyframeRequestRef.current = now;
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
@@ -313,13 +341,99 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     }
   }, []);
 
+  const discardPendingVideoFrames = React.useCallback(() => {
+    if (renderRafRef.current !== null) {
+      window.cancelAnimationFrame(renderRafRef.current);
+      renderRafRef.current = null;
+    }
+    for (const pending of pendingVideoFramesRef.current) {
+      try { pending.frame.close(); } catch { }
+    }
+    pendingVideoFramesRef.current.length = 0;
+  }, []);
+
+  const presentVideoFrame = React.useCallback((frame: any, due: number, generation: number, cfg: StreamConfig) => {
+    lastDecodedFrameAtRef.current = Date.now();
+    decodedFrameCounterRef.current++;
+
+    const now = performance.now();
+    pendingVideoFramesRef.current.push({
+      frame,
+      due: Math.max(now - 20, Math.min(due, now + 120)),
+      generation,
+      cfg
+    });
+    while (pendingVideoFramesRef.current.length > MAX_PENDING_VIDEO_FRAMES) {
+      const stale = pendingVideoFramesRef.current.shift();
+      try { stale?.frame.close(); } catch { }
+      droppedCounterRef.current++;
+    }
+
+    const pump = () => {
+      renderRafRef.current = null;
+      const queue = pendingVideoFramesRef.current;
+      while (queue.length > 0 && queue[0].generation !== videoGenerationRef.current) {
+        const stale = queue.shift();
+        try { stale?.frame.close(); } catch { }
+      }
+      if (queue.length === 0) return;
+
+      const presentAt = performance.now() + 2;
+      let readyIndex = -1;
+      for (let index = 0; index < queue.length && queue[index].due <= presentAt; index++)
+        readyIndex = index;
+
+      if (readyIndex >= 0) {
+        // If more than one frame is already due, draw only the newest. Closing the
+        // superseded VideoFrames bounds GPU memory and keeps latency from growing.
+        for (let index = 0; index < readyIndex; index++) {
+          const stale = queue.shift();
+          try { stale?.frame.close(); } catch { }
+          droppedCounterRef.current++;
+        }
+        const pending = queue.shift();
+        if (pending) {
+          try {
+            const canvas = canvasRef.current;
+            if (canvas && pending.generation === videoGenerationRef.current) {
+              const frameWidth = Math.max(1, Number(pending.frame.displayWidth || pending.frame.codedWidth || pending.cfg.width));
+              const frameHeight = Math.max(1, Number(pending.frame.displayHeight || pending.frame.codedHeight || pending.cfg.height));
+              if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+                canvas.width = frameWidth;
+                canvas.height = frameHeight;
+                canvasCtxRef.current = null;
+              }
+              setFrameSize(current => current?.width === frameWidth && current?.height === frameHeight
+                ? current
+                : { width: frameWidth, height: frameHeight });
+              const ctx = canvasCtxRef.current ?? canvas.getContext('2d', { alpha: false, desynchronized: true });
+              canvasCtxRef.current = ctx;
+              ctx?.drawImage(pending.frame, 0, 0, canvas.width, canvas.height);
+              setHasVideo(true);
+              setError('');
+            }
+          } finally {
+            try { pending.frame.close(); } catch { }
+          }
+        }
+      }
+
+      if (queue.length > 0) renderRafRef.current = window.requestAnimationFrame(pump);
+    };
+
+    if (renderRafRef.current === null)
+      renderRafRef.current = window.requestAnimationFrame(pump);
+  }, []);
+
   const closeVideoDecoder = React.useCallback(() => {
     videoGenerationRef.current++;
+    discardPendingVideoFrames();
     try { videoDecoder.current?.close?.(); } catch { }
     videoDecoder.current = null;
     videoCodecRef.current = '';
+    decoderCongestedSinceRef.current = 0;
     waitForKeyframe.current = true;
-  }, []);
+  }, [discardPendingVideoFrames]);
 
   const rejectCodecCapability = React.useCallback((cfg: StreamConfig, codec: string) => {
     const caps = capabilitiesRef.current;
@@ -354,30 +468,48 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       return false;
     }
 
-    const candidate = {
+    let acceleration: 'no-preference' | 'prefer-software' =
+      softwareDecoderCodecsRef.current.has(codec) ? 'prefer-software' : 'no-preference';
+    let candidate = {
       codec,
       codedWidth: cfg.width,
       codedHeight: cfg.height,
-      optimizeForLatency: true
+      optimizeForLatency: true,
+      hardwareAcceleration: acceleration
     };
 
     try {
       if (typeof VideoDecoderCtor.isConfigSupported === 'function') {
-        const support = await VideoDecoderCtor.isConfigSupported(candidate);
+        let support = await VideoDecoderCtor.isConfigSupported(candidate);
         if (generation !== videoGenerationRef.current || configRef.current !== cfg) return false;
+        if (!support?.supported && acceleration === 'no-preference') {
+          const softwareCandidate = { ...candidate, hardwareAcceleration: 'prefer-software' as const };
+          const softwareSupport = await VideoDecoderCtor.isConfigSupported(softwareCandidate);
+          if (generation !== videoGenerationRef.current || configRef.current !== cfg) return false;
+          if (softwareSupport?.supported) {
+            softwareDecoderCodecsRef.current.add(codec);
+            acceleration = 'prefer-software';
+            candidate = softwareCandidate;
+            support = softwareSupport;
+          }
+        }
         if (!support?.supported) {
           setError(`Codec não suportado neste cliente: ${codec}. O AKTela solicitará modo compatibilidade.`);
           rejectCodecCapability(cfg, codec);
           const ws = wsRef.current;
           if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'unsupported-codec', codec }));
-          requestKeyframe('unsupported-codec');
           return false;
         }
       }
     } catch (e: any) {
-      setError(`Falha ao verificar ${codec}: ${e?.message ?? e}`);
-      rejectCodecCapability(cfg, codec);
-      return false;
+      // Older Chromium builds may reject the hint even though configure() works.
+      candidate = {
+        codec,
+        codedWidth: cfg.width,
+        codedHeight: cfg.height,
+        optimizeForLatency: true,
+        hardwareAcceleration: acceleration
+      };
     }
 
     const decoder = new VideoDecoderCtor({
@@ -385,43 +517,24 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         const ts = Number(frame.timestamp ?? 0);
         ensureTimeline(ts);
         const due = perfBaseMs.current + (ts - (mediaBaseUs.current ?? ts)) / 1000;
-        const draw = () => {
-          if (generation !== videoGenerationRef.current) {
-            frame.close();
-            return;
-          }
-          const canvas = canvasRef.current;
-          if (canvas) {
-            // A configuração negocia o codec, mas a área visível entregue por alguns
-            // drivers pode ser diferente. O frame real é a fonte da proporção exibida.
-            const frameWidth = Math.max(1, Number(frame.displayWidth || frame.codedWidth || cfg.width));
-            const frameHeight = Math.max(1, Number(frame.displayHeight || frame.codedHeight || cfg.height));
-            if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
-              canvas.width = frameWidth;
-              canvas.height = frameHeight;
-              canvasCtxRef.current = null;
-            }
-            setFrameSize(current => current?.width === frameWidth && current?.height === frameHeight
-              ? current
-              : { width: frameWidth, height: frameHeight });
-            const ctx = canvasCtxRef.current ?? canvas.getContext('2d', { alpha: false, desynchronized: true });
-            canvasCtxRef.current = ctx;
-            ctx?.drawImage(frame, 0, 0, canvas.width, canvas.height);
-            lastDecodedFrameAtRef.current = Date.now();
-            decodedFrameCounterRef.current++;
-            setHasVideo(true);
-            setError('');
-          }
+        if (generation !== videoGenerationRef.current) {
           frame.close();
-        };
-        const wait = Math.max(0, due - performance.now());
-        wait > 3 ? window.setTimeout(draw, Math.min(wait, 70)) : draw();
+          return;
+        }
+        presentVideoFrame(frame, due, generation, cfg);
       },
       error: (e: any) => {
         if (generation !== videoGenerationRef.current) return;
         decoderResetsRef.current++;
-        setHasVideo(false);
         const decoderMessage = String(e?.message ?? e);
+        if (acceleration !== 'prefer-software') {
+          softwareDecoderCodecsRef.current.add(codec);
+          setError(`A aceleração de vídeo falhou. Tentando decoder por software para ${codec}.`);
+          closeVideoDecoder();
+          requestKeyframe('software-decoder-fallback');
+          return;
+        }
+
         setError(decoderMessage.toLowerCase().includes('unsupported configuration')
           ? `Este dispositivo rejeitou ${codec}. Tentando H.264 Baseline ou VP8 automaticamente.`
           : `Falha ao decodificar ${codec}: ${decoderMessage}`);
@@ -429,7 +542,6 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         closeVideoDecoder();
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'decode-error', codec }));
-        requestKeyframe('decode-error');
       }
     });
 
@@ -437,18 +549,25 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       decoder.configure(candidate);
       videoDecoder.current = decoder;
       videoCodecRef.current = codec;
+      decoderAccelerationRef.current = acceleration;
+      decoderCongestedSinceRef.current = 0;
       waitForKeyframe.current = true;
       return true;
     } catch (e: any) {
       try { decoder.close(); } catch { }
+      if (acceleration !== 'prefer-software') {
+        softwareDecoderCodecsRef.current.add(codec);
+        setError(`A configuração acelerada de ${codec} falhou. Tentando decoder por software.`);
+        requestKeyframe('software-config-fallback');
+        return false;
+      }
       setError(`Não foi possível configurar ${codec}: ${e?.message ?? e}`);
       rejectCodecCapability(cfg, codec);
       const ws = wsRef.current;
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'configure-error', codec }));
-      requestKeyframe('configure-error');
       return false;
     }
-  }, [closeVideoDecoder, ensureTimeline, rejectCodecCapability, requestKeyframe]);
+  }, [closeVideoDecoder, ensureTimeline, presentVideoFrame, rejectCodecCapability, requestKeyframe]);
 
   const ensureAudio = React.useCallback(async () => {
     let ac = audioContext.current;
@@ -490,7 +609,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
           };
           node.connect(outputGain);
           const cfg = configRef.current;
-          node.port.postMessage({ type: 'configure', channels: cfg?.audioChannels ?? 2, targetMs: 60, maxMs: 160 });
+          node.port.postMessage({ type: 'configure', channels: cfg?.audioChannels ?? 2, targetMs: 80, maxMs: 220 });
           audioWorkletNode.current = node;
           clearScheduledAudio();
           return node;
@@ -554,9 +673,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         // bloqueado ou player antes mutado), o relógio do AudioContext começou depois.
         // Reancore apenas o primeiro bloco; esperar a idade inteira da transmissão
         // deixaria o player visualmente ativo, mas silencioso por vários segundos.
-        if (!audioPlayoutStarted.current && Math.abs(timelineWhen - now) > 0.140) {
-          audioBaseSec.current = now + 0.060 - mediaDeltaSec;
-          timelineWhen = now + 0.060;
+        if (!audioPlayoutStarted.current && Math.abs(timelineWhen - now) > 0.220) {
+          audioBaseSec.current = now + 0.080 - mediaDeltaSec;
+          timelineWhen = now + 0.080;
         }
         const durationSec = Math.max(0.005, data.numberOfFrames / data.sampleRate);
         const worklet = audioWorkletNode.current;
@@ -565,7 +684,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
           // Se a aba congelou por tempo suficiente para tornar o PCM inútil, descarte
           // o trecho antigo. O próximo bloco que alcançar a linha do tempo recomeça
           // com uma pequena reserva, sem atrasar o vídeo.
-          if (now - timelineWhen > 0.140) {
+          if (now - timelineWhen > 0.220) {
             resetAudioPlayout();
             data.close();
             return;
@@ -578,7 +697,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
           }
 
           const gapFrames = expected !== null && ts > expected + 1_000
-            ? Math.min(Math.round((ts - expected) * data.sampleRate / 1_000_000), Math.round(data.sampleRate * 0.120))
+            ? Math.min(Math.round((ts - expected) * data.sampleRate / 1_000_000), Math.round(data.sampleRate * 0.180))
             : 0;
           const firstBlock = !audioPlayoutStarted.current;
           const startDelayFrames = firstBlock
@@ -610,12 +729,12 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         planes.forEach((channel, index) => buffer.copyToChannel(channel, index));
         audioPlayoutStarted.current = true;
 
-        if (now - timelineWhen > 0.120) { data.close(); return; }
+        if (now - timelineWhen > 0.180) { data.close(); return; }
 
         let when = Math.max(timelineWhen, audioNextSec.current, now + 0.008);
-        if (when - now > 0.140) {
+        if (when - now > 0.220) {
           clearScheduledAudio();
-          when = now + 0.060;
+          when = now + 0.080;
         }
 
         const source = ac.createBufferSource();
@@ -636,7 +755,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     try {
       decoder.configure({ codec: 'opus', sampleRate: cfg.audioSampleRate, numberOfChannels: cfg.audioChannels });
       audioDecoder.current = decoder;
-      try { audioWorkletNode.current?.port.postMessage({ type: 'configure', channels: cfg.audioChannels, targetMs: 60, maxMs: 160 }); } catch { }
+      try { audioWorkletNode.current?.port.postMessage({ type: 'configure', channels: cfg.audioChannels, targetMs: 80, maxMs: 220 }); } catch { }
     } catch { }
   }, [clearScheduledAudio, ensureTimeline, resetAudioPlayout]);
 
@@ -694,13 +813,22 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
 
         if (videoDecoder.current?.state !== 'configured') return;
 
-        if (videoDecoder.current.decodeQueueSize > 5) {
-          droppedCounterRef.current++;
-          decoderResetsRef.current++;
-          setHasVideo(false);
-          closeVideoDecoder();
-          requestKeyframe('decoder-congestion');
-          return;
+        const decodeQueue = Number(videoDecoder.current.decodeQueueSize ?? 0);
+        const { soft: softLimit, hard: hardLimit } = decoderQueueLimits(cfg.fps);
+        if (decodeQueue >= softLimit) {
+          if (decoderCongestedSinceRef.current === 0)
+            decoderCongestedSinceRef.current = performance.now();
+          const congestedFor = performance.now() - decoderCongestedSinceRef.current;
+          if (decodeQueue >= hardLimit || congestedFor > 700) {
+            droppedCounterRef.current++;
+            decoderResetsRef.current++;
+            closeVideoDecoder();
+            setError('O decoder não acompanhou o fluxo. Aguardando um quadro limpo para retomar.');
+            requestKeyframe('decoder-congestion');
+            return;
+          }
+        } else {
+          decoderCongestedSinceRef.current = 0;
         }
 
         const C = (window as any).EncodedVideoChunk;
@@ -722,7 +850,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       if (kind === 2 && audioDecoder.current?.state === 'configured') {
         // Opus é barato de decodificar; uma fila moderada é preferível a eliminar
         // blocos de 20 ms, que se manifestam exatamente como pequenos cortes.
-        if (audioDecoder.current.decodeQueueSize > 16) {
+        if (audioDecoder.current.decodeQueueSize > 24) {
           droppedCounterRef.current++;
           return;
         }
@@ -732,7 +860,6 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       }
     } catch (e: any) {
       droppedCounterRef.current++;
-      setHasVideo(false);
       closeVideoDecoder();
       setError(`Falha ao processar mídia: ${e?.message ?? e}`);
       requestKeyframe('packet-error');
@@ -762,11 +889,33 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     if (offset !== bytes.byteLength) throw new Error('Dados extras no lote de mídia.');
   }, [processMediaPacket]);
 
-  const enqueueMediaMessage = React.useCallback((ab: ArrayBuffer) => {
-    mediaChainRef.current = mediaChainRef.current
-      .then(() => processMediaMessage(ab))
-      .catch((e: any) => setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`));
+  const drainMediaQueue = React.useCallback(async () => {
+    if (mediaProcessingRef.current) return;
+    mediaProcessingRef.current = true;
+    try {
+      while (mediaQueueRef.current.length > 0) {
+        const message = mediaQueueRef.current.shift();
+        if (message) await processMediaMessage(message);
+      }
+    } catch (e: any) {
+      setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`);
+    } finally {
+      mediaProcessingRef.current = false;
+    }
   }, [processMediaMessage]);
+
+  const enqueueMediaMessage = React.useCallback((ab: ArrayBuffer) => {
+    const queue = mediaQueueRef.current;
+    if (queue.length >= MAX_PENDING_MEDIA_MESSAGES) {
+      droppedCounterRef.current += queue.length;
+      queue.length = 0;
+      closeVideoDecoder();
+      setError('O cliente ficou ocupado e descartou mídia atrasada. Sincronizando o fluxo atual.');
+      requestKeyframe('client-media-queue');
+    }
+    queue.push(ab);
+    void drainMediaQueue();
+  }, [closeVideoDecoder, drainMediaQueue, requestKeyframe]);
 
   React.useEffect(() => {
     if (embedded) {
@@ -843,6 +992,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
               liveRef.current = m.live;
               setLive(m.live);
               if (!m.live) {
+                mediaQueueRef.current.length = 0;
                 remoteCursorVisibleRef.current = false;
                 if (cursorRef.current) cursorRef.current.style.display = 'none';
                 configRef.current = null;
@@ -852,6 +1002,8 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
                 try { audioDecoder.current?.close?.(); } catch { }
                 audioDecoder.current = null;
                 setHasVideo(false);
+                decoderStallCountRef.current = 0;
+                lastDecoderStallAtRef.current = 0;
                 resetTimeline();
                 closeVideoDecoder();
               }
@@ -862,6 +1014,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
               // (veja o "pong" de texto puro em onmessage, que é o RTT sem viés de fila).
               lastPongRef.current = Date.now();
             } else if (m.type === 'stream-config') {
+              mediaQueueRef.current.length = 0;
               configRef.current = m;
               setConfig(m);
               setFrameSize({ width: m.width, height: m.height });
@@ -869,6 +1022,8 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
               lastVideoPacketAtRef.current = Date.now();
               lastDecodedFrameAtRef.current = Date.now();
               setHasVideo(false);
+              decoderStallCountRef.current = 0;
+              lastDecoderStallAtRef.current = 0;
               setError('');
               resetTimeline();
               closeVideoDecoder();
@@ -931,6 +1086,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         setConfig(null);
         setFrameSize(null);
         setVideoPackets(0);
+        decoderStallCountRef.current = 0;
+        lastDecoderStallAtRef.current = 0;
+        mediaQueueRef.current.length = 0;
         resetTimeline();
         closeVideoDecoder();
         try { audioDecoder.current?.close?.(); } catch { }
@@ -967,10 +1125,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       videoEnabledRef.current = visible;
       const ws = wsRef.current;
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'set-video', enabled: visible }));
+      mediaQueueRef.current.length = 0;
+      closeVideoDecoder();
       if (visible) {
-        setHasVideo(false);
-        resetTimeline();
-        closeVideoDecoder();
         requestKeyframe('viewer-visible');
       }
     };
@@ -982,6 +1139,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       document.removeEventListener('visibilitychange', visibility);
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
       if (remoteCursorTimerRef.current) window.clearTimeout(remoteCursorTimerRef.current);
+      mediaQueueRef.current.length = 0;
       try { wsRef.current?.close(); } catch { }
       closeVideoDecoder();
       resetAudioPlayout();
@@ -1013,20 +1171,45 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       const packetAge = lastVideoPacketAtRef.current > 0 ? now - lastVideoPacketAtRef.current : Number.POSITIVE_INFINITY;
       const frameAge = lastDecodedFrameAtRef.current > 0 ? now - lastDecodedFrameAtRef.current : Number.POSITIVE_INFINITY;
       const expectingVideo = videoEnabledRef.current && relayConnectedRef.current && liveRef.current && configRef.current !== null;
-      const packetsStopped = expectingVideo && packetAge > 2600;
-      const decoderStopped = expectingVideo && packetAge < 1300 && frameAge > 1900;
-      const stalled = packetsStopped || decoderStopped;
+      const stall = classifyVideoStall(expectingVideo, packetAge, frameAge);
+      const packetsStopped = stall === 'packets-stopped';
+      const decoderStopped = stall === 'decoder-stopped';
+      const stalled = stall !== null;
 
-      if (stalled && now - lastStallRecoveryAtRef.current > 2400) {
+      if (packetsStopped && now - lastStallRecoveryAtRef.current > 5000) {
+        lastStallRecoveryAtRef.current = now;
+        setError('O vídeo parou de chegar. Solicitando um quadro atual sem apagar a última imagem.');
+        requestKeyframe('video-packets-stalled');
+      } else if (decoderStopped && now - lastStallRecoveryAtRef.current > 3500) {
         lastStallRecoveryAtRef.current = now;
         decoderResetsRef.current++;
-        setHasVideo(false);
-        setError(packetsStopped
-          ? 'O vídeo parou de chegar. Solicitando recuperação automática.'
-          : 'O vídeo chegou, mas a reprodução travou. Reiniciando o decoder.');
-        resetTimeline();
+        decoderStallCountRef.current = nextDecoderStallCount(
+          decoderStallCountRef.current,
+          lastDecoderStallAtRef.current,
+          now
+        );
+        lastDecoderStallAtRef.current = now;
+        const codec = videoCodecRef.current;
+        if (decoderStallCountRef.current >= 2 && codec)
+          softwareDecoderCodecsRef.current.add(codec);
         closeVideoDecoder();
-        requestKeyframe(packetsStopped ? 'video-packets-stalled' : 'video-decode-stalled');
+        setError(decoderStallCountRef.current >= 2
+          ? 'O decoder acelerado não respondeu. Retomando com decoder por software.'
+          : 'Os pacotes chegaram, mas o decoder parou. Sincronizando em um novo quadro.');
+        requestKeyframe('video-decode-stalled');
+      }
+
+      if (!stalled && lastDecoderStallAtRef.current > 0 &&
+          now - lastDecoderStallAtRef.current > DECODER_STALL_ESCALATION_WINDOW_MS) {
+        decoderStallCountRef.current = 0;
+        lastDecoderStallAtRef.current = 0;
+      }
+
+      // A falta de pacotes não é corrigida reiniciando o decoder local. Após uma
+      // tentativa de keyframe, reconectar o socket recupera sessões presas no proxy.
+      if (packetsStopped && packetAge > VIDEO_PACKET_RECONNECT_MS && now - lastForcedReconnectAtRef.current > 12_000) {
+        lastForcedReconnectAtRef.current = now;
+        try { wsRef.current?.close(4010, 'video-packet-timeout'); } catch { }
       }
 
       const decodeQueue = Number(videoDecoder.current?.decodeQueueSize ?? 0);
@@ -1036,6 +1219,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         decodedFps,
         decodeQueue,
         codec: videoCodecRef.current || configRef.current?.videoCodecString || '—',
+        decoderMode: decoderAccelerationRef.current === 'prefer-software' ? 'Software' : 'Automático',
         reconnects: reconnectsRef.current,
         keyframes: keyframeCounterRef.current,
         dropped: droppedCounterRef.current,
@@ -1060,7 +1244,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       }
     }, 1000);
     return () => window.clearInterval(interval);
-  }, [closeVideoDecoder, requestKeyframe, resetTimeline]);
+  }, [closeVideoDecoder, requestKeyframe]);
 
   React.useEffect(() => {
     mutedRef.current = muted;
@@ -1247,6 +1431,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         <div><span>Relay</span><strong>{relayConnected ? 'Conectado' : 'Desconectado'}</strong></div>
         <div><span>Ping</span><strong className={latency === 0 ? '' : latency < 260 ? 'metric-good' : latency < 450 ? 'metric-warn' : 'metric-bad'}>{latency ? `${latency} ms` : '—'}</strong></div>
         <div><span>Codec</span><strong>{diagnostics.codec}</strong></div>
+        <div><span>Decoder</span><strong>{diagnostics.decoderMode}</strong></div>
         <div><span>Resolução</span><strong>{config ? `${config.width}×${config.height}` : '—'}</strong></div>
         <div><span>Pacotes/s</span><strong>{diagnostics.packetsPerSec}</strong></div>
         <div><span>FPS reproduzido</span><strong>{diagnostics.decodedFps}</strong></div>

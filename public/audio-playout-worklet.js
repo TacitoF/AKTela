@@ -1,7 +1,7 @@
-// Três blocos Opus de 20 ms deixam margem sobre os lotes de rede de 30 ms sem
-// adicionar atraso visual perceptível. Áudio e vídeo continuam na mesma timeline.
-const DEFAULT_TARGET_MS = 60;
-const DEFAULT_MAX_MS = 160;
+// Quatro blocos Opus de 20 ms absorvem pausas curtas do Chromium/Discord sem
+// mascarar congestionamento real. Áudio e vídeo usam a mesma margem de 80 ms.
+const DEFAULT_TARGET_MS = 80;
+const DEFAULT_MAX_MS = 220;
 const FADE_MS = 5;
 
 class AKTelaAudioPlayoutProcessor extends AudioWorkletProcessor {
@@ -54,8 +54,8 @@ class AKTelaAudioPlayoutProcessor extends AudioWorkletProcessor {
 
   configure(message) {
     const nextChannels = Math.max(1, Math.min(2, Number(message.channels) || 2));
-    const nextTarget = this.msToFrames(Math.max(20, Math.min(80, Number(message.targetMs) || DEFAULT_TARGET_MS)));
-    const nextCapacity = this.msToFrames(Math.max(80, Math.min(250, Number(message.maxMs) || DEFAULT_MAX_MS)));
+    const nextTarget = this.msToFrames(Math.max(20, Math.min(120, Number(message.targetMs) || DEFAULT_TARGET_MS)));
+    const nextCapacity = this.msToFrames(Math.max(80, Math.min(300, Number(message.maxMs) || DEFAULT_MAX_MS)));
     this.channelCount = nextChannels;
     this.targetFrames = Math.min(nextTarget, nextCapacity);
     this.capacityFrames = nextCapacity;
@@ -112,35 +112,39 @@ class AKTelaAudioPlayoutProcessor extends AudioWorkletProcessor {
     return 0;
   }
 
-  writeFrame(values) {
-    for (let channel = 0; channel < this.channelCount; channel++) {
-      const value = values[Math.min(channel, values.length - 1)] || 0;
-      this.buffers[channel][this.writeIndex] = value;
-      this.lastQueued[channel] = value;
-    }
-    this.writeIndex = (this.writeIndex + 1) % this.capacityFrames;
-    this.availableFrames++;
-  }
-
   pushGap(frameCount) {
     const skip = this.makeRoom(frameCount);
+    const written = frameCount - skip;
+    const left = this.lastQueued[0] || 0;
+    const right = this.lastQueued[Math.min(1, this.channelCount - 1)] || 0;
     for (let frame = skip; frame < frameCount; frame++) {
       const gain = Math.max(0, 1 - frame / this.fadeFrames);
-      this.writeFrame(this.lastQueued.map(value => value * gain));
+      const index = (this.writeIndex + frame - skip) % this.capacityFrames;
+      for (let channel = 0; channel < this.channelCount; channel++) {
+        const value = (channel === 0 ? left : right) * gain;
+        this.buffers[channel][index] = value;
+        this.lastQueued[channel] = value;
+      }
     }
+    this.writeIndex = (this.writeIndex + written) % this.capacityFrames;
+    this.availableFrames += written;
   }
 
   pushPlanes(planes, frameCount, fadeIn) {
     const skip = this.makeRoom(frameCount);
+    const written = frameCount - skip;
     for (let frame = skip; frame < frameCount; frame++) {
       const gain = fadeIn ? Math.min(1, (frame - skip + 1) / this.fadeFrames) : 1;
-      const values = [];
+      const index = (this.writeIndex + frame - skip) % this.capacityFrames;
       for (let channel = 0; channel < this.channelCount; channel++) {
         const plane = planes[Math.min(channel, planes.length - 1)];
-        values.push((plane[frame] || 0) * gain);
+        const value = (plane[frame] || 0) * gain;
+        this.buffers[channel][index] = value;
+        this.lastQueued[channel] = value;
       }
-      this.writeFrame(values);
     }
+    this.writeIndex = (this.writeIndex + written) % this.capacityFrames;
+    this.availableFrames += written;
   }
 
   beginPlaybackIfReady() {

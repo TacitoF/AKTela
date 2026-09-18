@@ -32,8 +32,8 @@ vm.runInContext(source, context, { filename: 'audio-playout-worklet.js' });
 assert.ok(Processor, 'o processador precisa ser registrado');
 
 const processor = new Processor();
-assert.equal(processor.targetFrames, 2_880, 'a reserva padrão deve absorver pequenas oscilações da rede');
-assert.equal(processor.capacityFrames, 7_680, 'o limite padrão não deve deixar o áudio acumular atraso');
+assert.equal(processor.targetFrames, 3_840, 'a reserva padrão deve absorver pausas curtas do cliente');
+assert.equal(processor.capacityFrames, 10_560, 'o limite padrão não deve deixar o áudio acumular atraso');
 processor.port.onmessage({ data: { type: 'configure', channels: 2, targetMs: 20, maxMs: 80 } });
 
 const left = new Float32Array(960).fill(0.5);
