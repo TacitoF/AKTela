@@ -1,7 +1,12 @@
-# AKTela Activity 2.7.0
+# AKTela Activity 2.8.0
 
 Cliente de visualização executado como Discord Activity.
 
+- Mantém filas limitadas de mensagens e frames, descarta somente trabalho atrasado e fecha cada VideoFrame substituído para não pressionar a GPU.
+- Usa requestAnimationFrame para apresentar frames na ordem da timeline, sem acumular temporizadores quando o Discord ou navegador fica ocupado.
+- Tenta o decoder padrão e muda para prefer-software quando o caminho acelerado falha, antes de negociar outro codec.
+- Preserva a última imagem durante uma falha, solicita um IDR com intervalo controlado e reconecta o WebSocket quando os pacotes realmente param.
+- Diferencia falta de pacotes de decoder travado, impedindo o ciclo infinito de resets exibido como “Recuperando vídeo”.
 - Descobre e exibe até três transmissões simultâneas na mesma Activity.
 - Suspende os pacotes e a decodificação de vídeo quando a Activity fica oculta, retomando a partir de um quadro-chave ao voltar.
 - Fora do proxy do Discord, usa mídia binária para reduzir Base64, banda e alocações; dentro do Discord preserva o transporte textual estável.
@@ -16,7 +21,7 @@ Cliente de visualização executado como Discord Activity.
 - O controle de volume permanece visível no player expandido de sessões com uma única tela.
 - O slider de volume também permanece visível e interativo ao expandir uma transmissão diretamente da grade.
 - Reproduz o PCM decodificado em um `AudioWorklet` contínuo, isolado da thread da interface.
-- Mantém uma reserva curta de 60 ms, suaviza microfaltas com fade e limita a fila a 160 ms.
+- Mantém uma reserva curta de 80 ms, suaviza microfaltas com fade e limita a fila a 220 ms.
 - Usa a mesma origem temporal para áudio e vídeo e descarta somente áudio realmente antigo.
 - Mantém o agendamento sequencial como fallback para navegadores sem `AudioWorklet`.
 - Exibe buffer e microfaltas de áudio no painel de diagnóstico.
@@ -26,7 +31,7 @@ Cliente de visualização executado como Discord Activity.
 
 - Negocia H.264 Main, Baseline, High ou VP8 conforme os recursos de todos os espectadores.
 - Valida o codec real do SPS e o envelope AKV5 antes da decodificação.
-- Detecta ausência de pacotes ou decoder parado, reinicia a reprodução e solicita um quadro-chave.
+- Detecta separadamente ausência de pacotes e decoder parado, recuperando cada caso sem interromper o áudio.
 - Descarta callbacks atrasados de decodificadores e WebSockets já substituídos.
 - Limpa vídeo, áudio e cursor ao desconectar, evitando estado congelado da sessão anterior.
 - Envia FPS reproduzido, fila, descartes e estado de travamento ao Capture.

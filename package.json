@@ -1,12 +1,12 @@
 {
   "name": "aktela-activity",
   "private": true,
-  "version": "2.7.0",
+  "version": "2.8.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node scripts/test-audio-worklet.mjs",
+    "test": "node scripts/test-audio-worklet.mjs && node scripts/test-media-policy.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
