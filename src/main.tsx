@@ -3,11 +3,14 @@ import ReactDOM from 'react-dom/client';
 import { DiscordSDK, patchUrlMappings } from '@discord/embedded-app-sdk';
 import './style.css';
 import './enhancements.css';
+import { base64ToArrayBuffer } from './media-transport';
+import { MediaWorkerClient } from './media-worker-client';
 import {
   DECODER_STALL_ESCALATION_WINDOW_MS,
   VIDEO_PACKET_RECONNECT_MS,
   classifyVideoStall,
   decoderQueueLimits,
+  mediaConfigChanges,
   nextDecoderStallCount
 } from './media-policy';
 
@@ -114,21 +117,6 @@ function observerRelayUrl(room: string, viewerId: string) {
   return `${base}?role=viewer&room=${encodeURIComponent(room)}&transport=text&observe=1&viewerId=${encodeURIComponent(viewerId)}`;
 }
 
-function base64ToArrayBuffer(value: string) {
-  const fast = (Uint8Array as unknown as { fromBase64?: (input: string) => Uint8Array }).fromBase64;
-  if (typeof fast === 'function') {
-    try {
-      const bytes = fast.call(Uint8Array, value);
-      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-    } catch { }
-  }
-
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
 function startCodeLength(data: Uint8Array, i: number) {
   if (i + 3 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) return 4;
   if (i + 2 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) return 3;
@@ -207,7 +195,7 @@ function Icon({ name }: { name: 'volume' | 'mute' | 'fullscreen' | 'collapse' | 
   return <svg {...p}><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>;
 }
 
-function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, allowImmersive = true, onFocus }: { room: string; streamId: string; embedded?: boolean; initialMuted?: boolean; allowImmersive?: boolean; onFocus?: () => void }) {
+function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, maxModeKey = '1080p60', allowImmersive = true, onFocus }: { room: string; streamId: string; embedded?: boolean; initialMuted?: boolean; maxModeKey?: ModeKey; allowImmersive?: boolean; onFocus?: () => void }) {
   const viewerIdRef = React.useRef(typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const playerRef = React.useRef<HTMLDivElement>(null);
   const videoPlaneRef = React.useRef<HTMLDivElement>(null);
@@ -219,6 +207,8 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const hudTimer = React.useRef<number | null>(null);
   const videoDecoder = React.useRef<any>(null);
   const audioDecoder = React.useRef<any>(null);
+  const audioGenerationRef = React.useRef(0);
+  const nextAudioRecoveryRef = React.useRef(0);
   const audioContext = React.useRef<AudioContext | null>(null);
   const gainNode = React.useRef<GainNode | null>(null);
   const audioWorkletNode = React.useRef<AudioWorkletNode | null>(null);
@@ -259,7 +249,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const lastForcedReconnectAtRef = React.useRef(0);
   const remoteCursorTimerRef = React.useRef<number | null>(null);
   const remoteCursorVisibleRef = React.useRef(false);
-  const mediaQueueRef = React.useRef<ArrayBuffer[]>([]);
+  const mediaWorkerRef = React.useRef<MediaWorkerClient | null>(null);
+  const mediaGenerationRef = React.useRef(0);
+  const mediaQueueRef = React.useRef<Array<{ buffer: ArrayBuffer; generation: number }>>([]);
   const mediaProcessingRef = React.useRef(false);
   const pendingVideoFramesRef = React.useRef<Array<{ frame: any; due: number; generation: number; cfg: StreamConfig }>>([]);
   const renderRafRef = React.useRef<number | null>(null);
@@ -267,6 +259,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const relayConnectedRef = React.useRef(false);
   const immersiveRef = React.useRef(false);
   const mutedRef = React.useRef(initialMuted);
+  const maxModeKeyRef = React.useRef(maxModeKey);
   const videoEnabledRef = React.useRef(document.visibilityState !== 'hidden');
 
   const [discordReady, setDiscordReady] = React.useState(embedded);
@@ -462,8 +455,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   const configureVideo = React.useCallback(async (cfg: StreamConfig, codec: string) => {
     closeVideoDecoder();
     const generation = videoGenerationRef.current;
+    const worker = mediaWorkerRef.current?.videoSupported ? mediaWorkerRef.current : null;
     const VideoDecoderCtor = (window as any).VideoDecoder;
-    if (!VideoDecoderCtor) {
+    if (!worker && !VideoDecoderCtor) {
       setError('Este cliente do Discord não oferece WebCodecs para vídeo.');
       return false;
     }
@@ -479,12 +473,15 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     };
 
     try {
-      if (typeof VideoDecoderCtor.isConfigSupported === 'function') {
-        let support = await VideoDecoderCtor.isConfigSupported(candidate);
+      if (worker || typeof VideoDecoderCtor?.isConfigSupported === 'function') {
+        const supports = async (config: unknown) => worker
+          ? { supported: await worker.isVideoConfigSupported(config) }
+          : VideoDecoderCtor.isConfigSupported(config);
+        let support = await supports(candidate);
         if (generation !== videoGenerationRef.current || configRef.current !== cfg) return false;
         if (!support?.supported && acceleration === 'no-preference') {
           const softwareCandidate = { ...candidate, hardwareAcceleration: 'prefer-software' as const };
-          const softwareSupport = await VideoDecoderCtor.isConfigSupported(softwareCandidate);
+          const softwareSupport = await supports(softwareCandidate);
           if (generation !== videoGenerationRef.current || configRef.current !== cfg) return false;
           if (softwareSupport?.supported) {
             softwareDecoderCodecsRef.current.add(codec);
@@ -512,7 +509,9 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       };
     }
 
-    const decoder = new VideoDecoderCtor({
+    if (generation !== videoGenerationRef.current || configRef.current !== cfg) return false;
+
+    const callbacks = {
       output: (frame: any) => {
         const ts = Number(frame.timestamp ?? 0);
         ensureTimeline(ts);
@@ -543,7 +542,8 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'decoder-error', reason: 'decode-error', codec }));
       }
-    });
+    };
+    const decoder = worker ? worker.createVideoDecoder(callbacks) : new VideoDecoderCtor(callbacks);
 
     try {
       decoder.configure(candidate);
@@ -644,6 +644,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   }, [audioReady, ensureAudio]);
 
   const configureAudio = React.useCallback((cfg: StreamConfig) => {
+    const generation = ++audioGenerationRef.current;
     resetAudioPlayout();
     try { audioDecoder.current?.close?.(); } catch { }
     audioDecoder.current = null;
@@ -653,6 +654,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
 
     const decoder = new AudioDecoderCtor({
       output: (data: any) => {
+        if (generation !== audioGenerationRef.current) { data.close(); return; }
         const ac = audioContext.current;
         const gain = gainNode.current;
         if (!ac || !gain || ac.state !== 'running') { data.close(); return; }
@@ -749,23 +751,31 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         audioNextSec.current = when + durationSec;
         data.close();
       },
-      error: () => { }
+      error: () => {
+        if (generation !== audioGenerationRef.current) return;
+        audioDecoder.current = null;
+        resetAudioPlayout();
+      }
     });
 
     try {
       decoder.configure({ codec: 'opus', sampleRate: cfg.audioSampleRate, numberOfChannels: cfg.audioChannels });
       audioDecoder.current = decoder;
       try { audioWorkletNode.current?.port.postMessage({ type: 'configure', channels: cfg.audioChannels, targetMs: 80, maxMs: 220 }); } catch { }
-    } catch { }
+    } catch {
+      try { decoder.close(); } catch { }
+      audioDecoder.current = null;
+    }
   }, [clearScheduledAudio, ensureTimeline, resetAudioPlayout]);
 
-  const processMediaPacket = React.useCallback(async (ab: ArrayBuffer, byteOffset = 0, byteLength = ab.byteLength - byteOffset) => {
+  const processMediaPacket = React.useCallback(async (ab: ArrayBuffer, byteOffset = 0, byteLength = ab.byteLength - byteOffset, generation = mediaGenerationRef.current) => {
+    let kind = 0;
     try {
       if (byteOffset < 0 || byteLength < HEADER || byteOffset + byteLength > ab.byteLength) return;
       const dv = new DataView(ab, byteOffset, byteLength);
       for (let i = 0; i < PROTOCOL_MAGIC.length; i++) if (dv.getUint8(i) !== PROTOCOL_MAGIC[i]) return;
 
-      const kind = dv.getUint8(5);
+      kind = dv.getUint8(5);
       if (dv.getUint8(4) !== 5 || (kind !== 1 && kind !== 2)) return;
       const key = (dv.getUint8(6) & 1) !== 0;
       const lo = dv.getUint32(8, true);
@@ -779,6 +789,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       ensureTimeline(ts);
 
       if (kind === 1) {
+        if (!videoEnabledRef.current || generation !== mediaGenerationRef.current) return;
         lastVideoPacketAtRef.current = Date.now();
         packetCounterRef.current++;
         setVideoPackets(v => v === 0 ? 1 : v);
@@ -831,23 +842,24 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
           decoderCongestedSinceRef.current = 0;
         }
 
-        const C = (window as any).EncodedVideoChunk;
-        if (!C) {
-          setError('EncodedVideoChunk não está disponível neste cliente do Discord.');
-          return;
+        const decoder = videoDecoder.current;
+        if (typeof decoder.decodePacket === 'function') {
+          decoder.decodePacket(key, ts, duration, payload);
+        } else {
+          const C = (window as any).EncodedVideoChunk;
+          if (!C) { setError('A reprodução de vídeo não está disponível neste cliente.'); return; }
+          decoder.decode(new C({ type: key ? 'key' : 'delta', timestamp: ts, duration, data: payload }));
         }
-
-        videoDecoder.current.decode(new C({
-          type: key ? 'key' : 'delta',
-          timestamp: ts,
-          duration,
-          data: payload
-        }));
         setLive(true);
         return;
       }
 
-      if (kind === 2 && audioDecoder.current?.state === 'configured') {
+      if (kind === 2 && configRef.current?.audioEnabled) {
+        if (audioDecoder.current?.state !== 'configured' && Date.now() >= nextAudioRecoveryRef.current) {
+          nextAudioRecoveryRef.current = Date.now() + 2000;
+          configureAudio(configRef.current);
+        }
+        if (audioDecoder.current?.state !== 'configured') return;
         // Opus é barato de decodificar; uma fila moderada é preferível a eliminar
         // blocos de 20 ms, que se manifestam exatamente como pequenos cortes.
         if (audioDecoder.current.decodeQueueSize > 24) {
@@ -860,17 +872,22 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       }
     } catch (e: any) {
       droppedCounterRef.current++;
+      if (kind === 2) {
+        try { audioDecoder.current?.close?.(); } catch { }
+        audioDecoder.current = null;
+        return;
+      }
       closeVideoDecoder();
       setError(`Falha ao processar mídia: ${e?.message ?? e}`);
       requestKeyframe('packet-error');
     }
-  }, [closeVideoDecoder, configureVideo, ensureTimeline, requestKeyframe]);
+  }, [closeVideoDecoder, configureAudio, configureVideo, ensureTimeline, requestKeyframe]);
 
-  const processMediaMessage = React.useCallback(async (ab: ArrayBuffer) => {
+  const processMediaMessage = React.useCallback(async (ab: ArrayBuffer, generation: number) => {
     const bytes = new Uint8Array(ab);
     const isBatch = bytes.byteLength >= BATCH_HEADER && BATCH_MAGIC.every((value, index) => bytes[index] === value);
     if (!isBatch) {
-      await processMediaPacket(ab);
+      await processMediaPacket(ab, 0, ab.byteLength, generation);
       return;
     }
 
@@ -883,7 +900,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       const length = view.getInt32(offset, true);
       offset += 4;
       if (length < HEADER || offset + length > bytes.byteLength) throw new Error('Pacote inválido dentro do lote.');
-      await processMediaPacket(ab, offset, length);
+      await processMediaPacket(ab, offset, length, generation);
       offset += length;
     }
     if (offset !== bytes.byteLength) throw new Error('Dados extras no lote de mídia.');
@@ -895,7 +912,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     try {
       while (mediaQueueRef.current.length > 0) {
         const message = mediaQueueRef.current.shift();
-        if (message) await processMediaMessage(message);
+        if (message) await processMediaMessage(message.buffer, message.generation);
       }
     } catch (e: any) {
       setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`);
@@ -904,7 +921,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
     }
   }, [processMediaMessage]);
 
-  const enqueueMediaMessage = React.useCallback((ab: ArrayBuffer) => {
+  const enqueueMediaMessage = React.useCallback((ab: ArrayBuffer, generation = mediaGenerationRef.current) => {
     const queue = mediaQueueRef.current;
     if (queue.length >= MAX_PENDING_MEDIA_MESSAGES) {
       droppedCounterRef.current += queue.length;
@@ -913,7 +930,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       setError('O cliente ficou ocupado e descartou mídia atrasada. Sincronizando o fluxo atual.');
       requestKeyframe('client-media-queue');
     }
-    queue.push(ab);
+    queue.push({ buffer: ab, generation });
     void drainMediaQueue();
   }, [closeVideoDecoder, drainMediaQueue, requestKeyframe]);
 
@@ -938,6 +955,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
   React.useEffect(() => {
     let disposed = false;
     let reconnectAttempt = 0;
+    let ownedWorker: MediaWorkerClient | null = null;
 
     void probeCapabilities().then(caps => {
       if (disposed) return;
@@ -949,7 +967,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
 
     const connect = () => {
       if (disposed) return;
-      const ws = new WebSocket(viewerRelayUrl(room, viewerIdRef.current, streamId, !initialMuted));
+      const ws = new WebSocket(viewerRelayUrl(room, viewerIdRef.current, streamId, !mutedRef.current));
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
@@ -961,7 +979,7 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         setError('');
         if (capabilitiesRef.current) ws.send(JSON.stringify(capabilitiesRef.current));
         ws.send(JSON.stringify({ type: 'set-audio', enabled: !mutedRef.current }));
-        ws.send(JSON.stringify({ type: 'set-video', enabled: videoEnabledRef.current }));
+        ws.send(JSON.stringify({ type: 'set-video', enabled: videoEnabledRef.current, maxModeKey: maxModeKeyRef.current }));
         lastPingSentAtRef.current = Date.now();
         ws.send('ping');
         requestKeyframe('viewer-connected');
@@ -981,8 +999,21 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
             return;
           }
           if (event.data.startsWith(TEXT_MEDIA_PREFIX)) {
-            try { enqueueMediaMessage(base64ToArrayBuffer(event.data.slice(TEXT_MEDIA_PREFIX.length))); }
-            catch (e: any) { setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`); }
+            const generation = mediaGenerationRef.current;
+            const value = event.data.slice(TEXT_MEDIA_PREFIX.length);
+            const worker = mediaWorkerRef.current;
+            if (worker) {
+              void worker.prepareBase64(value).then(buffer => {
+                if (!disposed && wsRef.current === ws) enqueueMediaMessage(buffer, generation);
+              }).catch(() => {
+                if (disposed || wsRef.current !== ws) return;
+                closeVideoDecoder();
+                requestKeyframe('media-worker-backlog');
+              });
+            } else {
+              try { enqueueMediaMessage(base64ToArrayBuffer(value), generation); }
+              catch (e: any) { setError(`Falha ao reconstruir mídia: ${e?.message ?? e}`); }
+            }
             return;
           }
 
@@ -992,6 +1023,8 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
               liveRef.current = m.live;
               setLive(m.live);
               if (!m.live) {
+                mediaGenerationRef.current++;
+                audioGenerationRef.current++;
                 mediaQueueRef.current.length = 0;
                 remoteCursorVisibleRef.current = false;
                 if (cursorRef.current) cursorRef.current.style.display = 'none';
@@ -1014,22 +1047,21 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
               // (veja o "pong" de texto puro em onmessage, que é o RTT sem viés de fila).
               lastPongRef.current = Date.now();
             } else if (m.type === 'stream-config') {
-              mediaQueueRef.current.length = 0;
+              const changes = mediaConfigChanges(configRef.current, m);
               configRef.current = m;
               setConfig(m);
-              setFrameSize({ width: m.width, height: m.height });
-              setFit('contain');
-              lastVideoPacketAtRef.current = Date.now();
-              lastDecodedFrameAtRef.current = Date.now();
-              setHasVideo(false);
-              decoderStallCountRef.current = 0;
-              lastDecoderStallAtRef.current = 0;
-              setError('');
-              resetTimeline();
-              closeVideoDecoder();
-              setVideoPackets(0);
-              configureAudio(m);
-              requestKeyframe('stream-config');
+              if (changes.video) {
+                mediaGenerationRef.current++;
+                setFrameSize({ width: m.width, height: m.height });
+                lastVideoPacketAtRef.current = Date.now();
+                lastDecodedFrameAtRef.current = Date.now();
+                decoderStallCountRef.current = 0;
+                lastDecoderStallAtRef.current = 0;
+                setError('');
+                closeVideoDecoder();
+                requestKeyframe('stream-config');
+              }
+              if (changes.audio) configureAudio(m);
             } else if (m.type === 'cursor') {
               const el = cursorRef.current;
               if (!el) return;
@@ -1069,12 +1101,17 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
         if (event.data instanceof ArrayBuffer) {
           enqueueMediaMessage(event.data);
         } else if (event.data instanceof Blob) {
-          void event.data.arrayBuffer().then(enqueueMediaMessage).catch(() => setError('Falha ao ler pacote binário do relay.'));
+          const generation = mediaGenerationRef.current;
+          void event.data.arrayBuffer().then(buffer => {
+            if (!disposed && wsRef.current === ws) enqueueMediaMessage(buffer, generation);
+          }).catch(() => setError('Falha ao ler pacote binário do relay.'));
         }
       };
 
       ws.onclose = () => {
         if (disposed || wsRef.current !== ws) return;
+        mediaGenerationRef.current++;
+        audioGenerationRef.current++;
         relayConnectedRef.current = false;
         remoteCursorVisibleRef.current = false;
         if (cursorRef.current) cursorRef.current.style.display = 'none';
@@ -1104,7 +1141,18 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       ws.onerror = () => { try { ws.close(); } catch { } };
     };
 
-    connect();
+    void MediaWorkerClient.create().then(worker => {
+      if (disposed) { worker?.dispose(); return; }
+      ownedWorker = worker;
+      mediaWorkerRef.current = worker;
+      if (worker) worker.onFailure = () => {
+        if (disposed || mediaWorkerRef.current !== worker) return;
+        mediaWorkerRef.current = null;
+        closeVideoDecoder();
+        requestKeyframe('media-worker-fallback');
+      };
+      connect();
+    });
 
     const heartbeat = window.setInterval(() => {
       const ws = wsRef.current;
@@ -1122,10 +1170,10 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
 
     const visibility = () => {
       const visible = document.visibilityState === 'visible';
+      mediaGenerationRef.current++;
       videoEnabledRef.current = visible;
       const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'set-video', enabled: visible }));
-      mediaQueueRef.current.length = 0;
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'set-video', enabled: visible, maxModeKey: maxModeKeyRef.current }));
       closeVideoDecoder();
       if (visible) {
         requestKeyframe('viewer-visible');
@@ -1135,6 +1183,10 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
 
     return () => {
       disposed = true;
+      mediaGenerationRef.current++;
+      audioGenerationRef.current++;
+      ownedWorker?.dispose();
+      if (mediaWorkerRef.current === ownedWorker) mediaWorkerRef.current = null;
       window.clearInterval(heartbeat);
       document.removeEventListener('visibilitychange', visibility);
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
@@ -1156,7 +1208,16 @@ function StreamPlayer({ room, streamId, embedded = false, initialMuted = false, 
       gainNode.current = null;
       audioContext.current = null;
     };
-  }, [closeVideoDecoder, configureAudio, enqueueMediaMessage, initialMuted, requestKeyframe, resetAudioPlayout, resetTimeline, room, streamId]);
+  }, [closeVideoDecoder, configureAudio, enqueueMediaMessage, requestKeyframe, resetAudioPlayout, resetTimeline, room, streamId]);
+
+  React.useEffect(() => {
+    maxModeKeyRef.current = maxModeKey;
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({ type: 'set-video', enabled: videoEnabledRef.current, maxModeKey }));
+  }, [maxModeKey]);
+
+  React.useEffect(() => { setMuted(initialMuted); }, [initialMuted]);
 
   React.useEffect(() => {
     let healthTick = 0;
@@ -1553,16 +1614,16 @@ function MultiApp() {
     </header>
 
     <div className={`stream-grid count-${visibleStreams.length} ${focusedStream ? 'focused' : ''}`}>
-      {visibleStreams.map(stream => <article className="stream-card" key={`${stream.id}-${focusedStream ? 'focus' : 'grid'}`}>
+      {visibleStreams.map(stream => <article className="stream-card" key={stream.id}>
         <header className="stream-card-header"><div className="stream-identity"><strong>{stream.publisherName || 'Transmissor'}</strong><span>{stream.label}</span></div>{focusedStream &&
           <button className="back-grid" onClick={() => setFocusedStream(null)} title="Voltar para todas as transmissões"><Icon name="grid"/><span>Voltar à grade</span></button>}
         </header>
-        <div className="stream-card-player"><StreamPlayer room={room} streamId={stream.id} embedded initialMuted={!focusedStream} allowImmersive={streams.length === 1} onFocus={!focusedStream && streams.length > 1 ? () => setFocusedStream(stream.id) : undefined}/></div>
+        <div className="stream-card-player"><StreamPlayer room={room} streamId={stream.id} embedded initialMuted={!focusedStream} maxModeKey={visibleStreams.length > 1 ? '720p30' : '1080p60'} allowImmersive={streams.length === 1} onFocus={!focusedStream && streams.length > 1 ? () => setFocusedStream(stream.id) : undefined}/></div>
       </article>)}
       {visibleStreams.length === 0 && <div className="multi-empty"><div className="empty-icon"><Icon name="monitor"/></div><h2>Aguardando transmissão</h2><p>Abra o AKTela Capture, cole o código abaixo e inicie o compartilhamento.</p></div>}
     </div>
 
-    <footer className="multi-bottom"><div className="pair-card"><div><span>Código do Capture</span><strong>{room}</strong></div><button onClick={copy}><Icon name="copy"/><span>{copied ? 'Copiado' : 'Copiar'}</span></button></div><p>{focusedStream ? 'Somente a tela destacada usa banda.' : streams.length > 1 ? 'Modo leve: cada tela limitada a 720p · 30 FPS.' : 'As próximas telas aparecerão automaticamente.'}</p></footer>
+    <footer className="multi-bottom"><div className="pair-card"><div><span>Código do Capture</span><strong>{room}</strong></div><button onClick={copy}><Icon name="copy"/><span>{copied ? 'Copiado' : 'Copiar'}</span></button></div><p>{focusedStream ? 'Qualidade ajustada à tela destacada e aos espectadores.' : streams.length > 1 ? 'Modo leve: cada tela limitada a 720p · 30 FPS.' : 'As próximas telas aparecerão automaticamente.'}</p></footer>
   </section></main>;
 }
 

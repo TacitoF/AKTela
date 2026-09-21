@@ -1,7 +1,11 @@
-# AKTela Activity 2.8.0
+# AKTela Activity 2.9.0
 
 Cliente de visualização executado como Discord Activity.
 
+- Preserva o áudio durante mudanças de resolução, FPS e codec; falhas de áudio são recuperadas separadamente do vídeo.
+- Destacar uma tela ou voltar à grade preserva a conexão e o decoder da transmissão escolhida.
+- Informa ao Relay a qualidade necessária para a grade ou o destaque, mantendo os limites dos espectadores que assistem à mesma transmissão.
+- Move a conversão Base64 e a decodificação de vídeo para um Worker, com filas limitadas e retorno automático ao processamento principal se o cliente não oferecer suporte.
 - Mantém filas limitadas de mensagens e frames, descarta somente trabalho atrasado e fecha cada VideoFrame substituído para não pressionar a GPU.
 - Usa requestAnimationFrame para apresentar frames na ordem da timeline, sem acumular temporizadores quando o Discord ou navegador fica ocupado.
 - Tenta o decoder padrão e muda para prefer-software quando o caminho acelerado falha, antes de negociar outro codec.
@@ -40,3 +44,7 @@ Cliente de visualização executado como Discord Activity.
 
 - Explica o fallback automático quando um driver rejeita H.264 depois da verificação inicial.
 - Mostra “Recuperando vídeo” durante travamentos e preserva métricas essenciais em telas menores.
+
+## Validação
+
+`npm test` verifica políticas de recuperação, áudio e filas do Worker. `npm run build` valida TypeScript e gera a versão publicada. Após `npx playwright install --with-deps --only-shell chromium`, `npm run test:browser` verifica decodificação real no Worker e os fluxos de destaque e recuperação de áudio com e sem Worker.

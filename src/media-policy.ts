@@ -24,3 +24,17 @@ export function nextDecoderStallCount(previous: number, lastStallAt: number, now
     ? previous + 1
     : 1;
 }
+
+type MediaConfig = {
+  width: number; height: number; fps: number; videoCodec: string; videoCodecString: string;
+  audioEnabled: boolean; audioSampleRate: number; audioChannels: number;
+};
+
+export function mediaConfigChanges(previous: MediaConfig | null, next: MediaConfig) {
+  return {
+    video: !previous || previous.width !== next.width || previous.height !== next.height ||
+      previous.fps !== next.fps || previous.videoCodec !== next.videoCodec || previous.videoCodecString !== next.videoCodecString,
+    audio: !previous || previous.audioEnabled !== next.audioEnabled ||
+      previous.audioSampleRate !== next.audioSampleRate || previous.audioChannels !== next.audioChannels
+  };
+}

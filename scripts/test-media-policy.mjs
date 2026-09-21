@@ -4,7 +4,8 @@ import {
   VIDEO_PACKET_RECONNECT_MS,
   classifyVideoStall,
   decoderQueueLimits,
-  nextDecoderStallCount
+  nextDecoderStallCount,
+  mediaConfigChanges
 } from '../src/media-policy.ts';
 
 assert.deepEqual(decoderQueueLimits(30), { soft: 8, hard: 16 });
@@ -19,3 +20,14 @@ assert.equal(nextDecoderStallCount(4, 10_000, 10_000 + DECODER_STALL_ESCALATION_
   'uma sessão estável deve encerrar a sequência de travamentos');
 
 console.log('Player: limites de fila e recuperação diferenciada validados.');
+
+const config = { width: 1280, height: 720, fps: 60, videoCodec: 'h264', videoCodecString: 'avc1.4D4020',
+  audioEnabled: true, audioSampleRate: 48000, audioChannels: 2 };
+assert.deepEqual(mediaConfigChanges(null, config), { video: true, audio: true });
+assert.deepEqual(mediaConfigChanges(config, { ...config }), { video: false, audio: false });
+assert.deepEqual(mediaConfigChanges(config, { ...config, width: 1920, height: 1080 }), { video: true, audio: false },
+  'ajustar a resolução não pode reiniciar o áudio');
+assert.deepEqual(mediaConfigChanges(config, { ...config, audioEnabled: false }), { video: false, audio: true },
+  'alterar somente o áudio não pode reiniciar o vídeo');
+assert.deepEqual(mediaConfigChanges(config, { ...config, audioSampleRate: 44100 }), { video: false, audio: true });
+console.log('Player: áudio preservado nas mudanças de qualidade e vídeo independente do áudio.');
