@@ -1,13 +1,14 @@
 {
   "name": "aktela-activity",
   "private": true,
-  "version": "2.8.0",
+  "version": "2.9.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node scripts/test-audio-worklet.mjs && node scripts/test-media-policy.mjs",
-    "preview": "vite preview"
+    "test": "node scripts/test-audio-worklet.mjs && node scripts/test-media-policy.mjs && node scripts/test-media-worker.mjs",
+    "preview": "vite preview",
+    "test:browser": "node scripts/test-browser.mjs"
   },
   "dependencies": {
     "@discord/embedded-app-sdk": "^2.5.0",
@@ -18,6 +19,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "playwright": "1.62.1",
     "typescript": "^5.9.2",
     "vite": "^7.1.0"
   }
